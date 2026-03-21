@@ -1,17 +1,19 @@
-import { For, Show, createMemo, type Accessor, type Component, type JSX } from "solid-js"
+import { For, Show, createMemo, createSignal, type Accessor, type Component, type JSX } from "solid-js"
 import type { File as GitFileStatus } from "@opencode-ai/sdk/v2/client"
 
-import { RefreshCw } from "lucide-solid"
+import { RefreshCw, ChevronDown, ChevronRight } from "lucide-solid"
 
 import { MonacoDiffViewer } from "../../../../file-viewer/monaco-diff-viewer"
 
 import DiffToolbar from "../components/DiffToolbar"
 import SplitFilePanel from "../components/SplitFilePanel"
+import GitGraphTab from "./GitGraphTab"
 import type { DiffContextMode, DiffViewMode, DiffWordWrapMode } from "../types"
 
 interface GitChangesTabProps {
   t: (key: string, vars?: Record<string, any>) => string
 
+  instanceId: string
   activeSessionId: Accessor<string | null>
 
   entries: Accessor<GitFileStatus[] | null>
@@ -46,6 +48,7 @@ interface GitChangesTabProps {
 }
 
 const GitChangesTab: Component<GitChangesTabProps> = (props) => {
+  const [showGitGraph, setShowGitGraph] = createSignal(false)
   const sessionId = createMemo(() => props.activeSessionId())
   const hasSession = createMemo(() => Boolean(sessionId() && sessionId() !== "info"))
   const entries = createMemo(() => (hasSession() ? props.entries() : null))
@@ -154,66 +157,110 @@ const GitChangesTab: Component<GitChangesTabProps> = (props) => {
     const renderEmptyList = () => <div class="p-3 text-xs text-secondary">{emptyViewerMessage()}</div>
 
     const renderListPanel = () => (
-      <Show when={nonDeletedList.length > 0} fallback={renderEmptyList()}>
-        <For each={sortedList}>
-          {(item) => (
-            <div
-              class={`file-list-item ${props.selectedPath() === item.path ? "file-list-item-active" : ""}`}
-              onClick={() => {
-                props.onOpenFile(item.path)
-              }}
-            >
-              <div class="file-list-item-content">
-                <div class="file-list-item-path" title={item.path}>
-                  <span class="file-path-text">{item.path}</span>
+      <div class="flex flex-col h-full">
+        <div class="flex-1 overflow-y-auto">
+          <Show when={nonDeletedList.length > 0} fallback={renderEmptyList()}>
+            <For each={sortedList}>
+              {(item) => (
+                <div
+                  class={`file-list-item ${props.selectedPath() === item.path ? "file-list-item-active" : ""}`}
+                  onClick={() => {
+                    props.onOpenFile(item.path)
+                  }}
+                >
+                  <div class="file-list-item-content">
+                    <div class="file-list-item-path" title={item.path}>
+                      <span class="file-path-text">{item.path}</span>
+                    </div>
+                    <div class="file-list-item-stats">
+                      <Show when={item.status === "deleted"}>
+                        <span class="text-[10px] text-secondary">deleted</span>
+                      </Show>
+                      <Show when={item.status !== "deleted"}>
+                        <>
+                          <span class="file-list-item-additions">+{item.added}</span>
+                          <span class="file-list-item-deletions">-{item.removed}</span>
+                        </>
+                      </Show>
+                    </div>
+                  </div>
                 </div>
-                <div class="file-list-item-stats">
-                  <Show when={item.status === "deleted"}>
-                    <span class="text-[10px] text-secondary">deleted</span>
-                  </Show>
-                  <Show when={item.status !== "deleted"}>
-                    <>
-                      <span class="file-list-item-additions">+{item.added}</span>
-                      <span class="file-list-item-deletions">-{item.removed}</span>
-                    </>
-                  </Show>
-                </div>
-              </div>
+              )}
+            </For>
+          </Show>
+        </div>
+
+        <div class="border-t border-border">
+          <button
+            type="button"
+            class="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold uppercase tracking-wide hover:bg-surface-hover transition-colors"
+            onClick={() => setShowGitGraph(!showGitGraph())}
+          >
+            <span>Git Graph</span>
+            <Show when={showGitGraph()} fallback={<ChevronRight class="h-3 w-3" />}>
+              <ChevronDown class="h-3 w-3" />
+            </Show>
+          </button>
+          <Show when={showGitGraph()}>
+            <div class="h-[300px] border-t border-border overflow-hidden">
+              <GitGraphTab t={props.t} instanceId={props.instanceId} />
             </div>
-          )}
-        </For>
-      </Show>
+          </Show>
+        </div>
+      </div>
     )
 
     const renderListOverlay = () => (
-      <Show when={nonDeletedList.length > 0} fallback={renderEmptyList()}>
-        <For each={sortedList}>
-          {(item) => (
-            <div
-              class={`file-list-item ${props.selectedPath() === item.path ? "file-list-item-active" : ""}`}
-              onClick={() => props.onOpenFile(item.path)}
-              title={item.path}
-            >
-              <div class="file-list-item-content">
-                <div class="file-list-item-path" title={item.path}>
-                  <span class="file-path-text">{item.path}</span>
+      <div class="flex flex-col h-full">
+        <div class="flex-1 overflow-y-auto">
+          <Show when={nonDeletedList.length > 0} fallback={renderEmptyList()}>
+            <For each={sortedList}>
+              {(item) => (
+                <div
+                  class={`file-list-item ${props.selectedPath() === item.path ? "file-list-item-active" : ""}`}
+                  onClick={() => props.onOpenFile(item.path)}
+                  title={item.path}
+                >
+                  <div class="file-list-item-content">
+                    <div class="file-list-item-path" title={item.path}>
+                      <span class="file-path-text">{item.path}</span>
+                    </div>
+                    <div class="file-list-item-stats">
+                      <Show when={item.status === "deleted"}>
+                        <span class="text-[10px] text-secondary">deleted</span>
+                      </Show>
+                      <Show when={item.status !== "deleted"}>
+                        <>
+                          <span class="file-list-item-additions">+{item.added}</span>
+                          <span class="file-list-item-deletions">-{item.removed}</span>
+                        </>
+                      </Show>
+                    </div>
+                  </div>
                 </div>
-                <div class="file-list-item-stats">
-                  <Show when={item.status === "deleted"}>
-                    <span class="text-[10px] text-secondary">deleted</span>
-                  </Show>
-                  <Show when={item.status !== "deleted"}>
-                    <>
-                      <span class="file-list-item-additions">+{item.added}</span>
-                      <span class="file-list-item-deletions">-{item.removed}</span>
-                    </>
-                  </Show>
-                </div>
-              </div>
+              )}
+            </For>
+          </Show>
+        </div>
+
+        <div class="border-t border-border">
+          <button
+            type="button"
+            class="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold uppercase tracking-wide hover:bg-surface-hover transition-colors"
+            onClick={() => setShowGitGraph(!showGitGraph())}
+          >
+            <span>Git Graph</span>
+            <Show when={showGitGraph()} fallback={<ChevronRight class="h-3 w-3" />}>
+              <ChevronDown class="h-3 w-3" />
+            </Show>
+          </button>
+          <Show when={showGitGraph()}>
+            <div class="h-[300px] border-t border-border overflow-hidden">
+              <GitGraphTab t={props.t} instanceId={props.instanceId} />
             </div>
-          )}
-        </For>
-      </Show>
+          </Show>
+        </div>
+      </div>
     )
 
     return (

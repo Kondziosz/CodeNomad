@@ -23,7 +23,6 @@ import type { DiffContextMode, DiffViewMode, DiffWordWrapMode, RightPanelTab } f
 import ChangesTab from "./tabs/ChangesTab"
 import FilesTab from "./tabs/FilesTab"
 import GitChangesTab from "./tabs/GitChangesTab"
-import GitGraphTab from "./tabs/GitGraphTab"
 import StatusTab from "./tabs/StatusTab"
 
 import { getDefaultWorktreeSlug, getOrCreateWorktreeClient, getWorktreeSlugForSession } from "../../../../stores/worktrees"
@@ -714,15 +713,6 @@ const RightPanel: Component<RightPanelProps> = (props) => {
                 <button
                   type="button"
                   role="tab"
-                  class={tabClass("git-graph")}
-                  aria-selected={rightPanelTab() === "git-graph"}
-                  onClick={() => setRightPanelTab("git-graph")}
-                >
-                  <span class="tab-label">Git Graph</span>
-                </button>
-                <button
-                  type="button"
-                  role="tab"
                   class={tabClass("files")}
                   aria-selected={rightPanelTab() === "files"}
                   onClick={() => setRightPanelTab("files")}
@@ -773,6 +763,7 @@ const RightPanel: Component<RightPanelProps> = (props) => {
         <Show when={rightPanelTab() === "git-changes"}>
           <GitChangesTab
             t={props.t}
+            instanceId={props.instanceId}
             activeSessionId={props.activeSessionId}
             entries={gitStatusEntries}
             statusLoading={gitStatusLoading}
@@ -798,13 +789,6 @@ const RightPanel: Component<RightPanelProps> = (props) => {
             onResizeMouseDown={handleSplitResizeMouseDown("git-changes")}
             onResizeTouchStart={handleSplitResizeTouchStart("git-changes")}
             isPhoneLayout={props.isPhoneLayout}
-          />
-        </Show>
-
-        <Show when={rightPanelTab() === "git-graph"}>
-          <GitGraphTab
-            t={props.t}
-            instanceId={props.instanceId}
           />
         </Show>
 
