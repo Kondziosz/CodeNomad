@@ -1,4 +1,4 @@
-export type RightPanelTab = "changes" | "git-changes" | "files" | "status"
+export type RightPanelTab = "changes" | "git-changes" | "git-graph" | "files" | "status"
 
 export type DiffViewMode = "split" | "unified"
 

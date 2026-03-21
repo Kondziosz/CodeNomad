@@ -209,6 +209,9 @@ export const serverApi = {
       `/api/workspaces/${encodeURIComponent(id)}/files/content?${params.toString()}`,
     )
   },
+  fetchGitGraph(id: string): Promise<{ graph: string }> {
+    return request<{ graph: string }>(`/api/workspaces/${encodeURIComponent(id)}/git-graph`)
+  },
 
   fetchConfigOwner<T extends Record<string, any> = Record<string, any>>(owner: string): Promise<T> {
     return request<T>(`/api/storage/config/${encodeURIComponent(owner)}`)

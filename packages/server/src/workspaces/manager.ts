@@ -83,6 +83,18 @@ export class WorkspaceManager {
     }
   }
 
+  getGitGraph(workspaceId: string): string {
+    const workspace = this.requireWorkspace(workspaceId)
+    const result = spawnSync("git", ["log", "--graph", "--oneline", "--decorate", "--color=always", "-n", "300"], {
+      cwd: workspace.path,
+      encoding: "utf8",
+    })
+    if (result.error) {
+      throw new Error(`Failed to execute git log: ${result.error.message}`)
+    }
+    return result.stdout || ""
+  }
+
   async create(folder: string, name?: string): Promise<WorkspaceDescriptor> {
  
     const id = `${Date.now().toString(36)}`

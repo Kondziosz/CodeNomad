@@ -100,6 +100,16 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: RouteDeps) {
       return handleWorkspaceError(error, reply)
     }
   })
+
+  app.get<{
+    Params: { id: string }
+  }>("/api/workspaces/:id/git-graph", async (request, reply) => {
+    try {
+      return { graph: deps.workspaceManager.getGitGraph(request.params.id) }
+    } catch (error) {
+      return handleWorkspaceError(error, reply)
+    }
+  })
 }
 
 
