@@ -1,4 +1,6 @@
 import { marked } from "marked"
+import markedKatex from "marked-katex-extension"
+import "katex/dist/katex.min.css"
 import { createHighlighter, type Highlighter, bundledLanguages } from "shiki/bundle/full"
 import { getLogger } from "./logger"
 import { tGlobal } from "./i18n"
@@ -256,6 +258,8 @@ function setupRenderer(isDark: boolean) {
     breaks: true,
     gfm: true,
   })
+  
+  marked.use(markedKatex({ throwOnError: false, output: "html" }))
 
   const renderer = new marked.Renderer()
 
@@ -354,7 +358,14 @@ export async function renderMarkdown(
   }
 
   const suppressHighlight = options?.suppressHighlight ?? false
-  const decoded = decodeHtmlEntities(content)
+  let decoded = decodeHtmlEntities(content)
+
+  // Preprocess math to handle LLM variations safely without breaking markdown
+  decoded = decoded.replace(/\\\[([\s\S]+?)\\\]/g, '\n\n$$\n$1\n$$\n\n')
+  decoded = decoded.replace(/\\\(([\s\S]+?)\\\)/g, ' $ $1 $ ')
+  decoded = decoded.replace(/\\\$((?!\s|\d)[^$]*?(?<!\s))\\\$/g, ' $ $1 $ ')
+  decoded = decoded.replace(/([(\[{'"-])\$/g, '$1 $')
+  decoded = decoded.replace(/\$([)\]}'"-])/g, '$ $1')
 
   if (!suppressHighlight) {
     // Queue language loading but don't wait for it to complete

@@ -103,9 +103,7 @@ export function updateSessionInfo(instanceId: string, sessionId: string): void {
       latestHasContextUsage = previousHasContextUsage
     }
 
-    if (!hasUsageEntries) {
-      isSubscriptionModel = previousInfo.isSubscriptionModel
-    } else if (!isSubscriptionModel) {
+    if (!selectedModel) {
       isSubscriptionModel = previousInfo.isSubscriptionModel
     }
   }
