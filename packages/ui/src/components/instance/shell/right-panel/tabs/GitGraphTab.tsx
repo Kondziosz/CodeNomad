@@ -54,7 +54,7 @@ const GitGraphTab: Component<GitGraphTabProps> = (props) => {
         </Show>
         <Show when={graphHtml()}>
           <pre
-            class="text-xs font-mono whitespace-pre overflow-x-auto"
+            class="text-xs font-mono whitespace-pre-wrap break-words"
             innerHTML={graphHtml()!}
             style={{ "line-height": "1.2" }}
           />
