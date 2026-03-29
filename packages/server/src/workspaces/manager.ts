@@ -1,4 +1,6 @@
 import path from "path"
+import fs from "fs"
+import os from "os"
 import { spawnSync } from "child_process"
 import { connect } from "net"
 import { EventBus } from "../events/bus"
@@ -138,9 +140,24 @@ export class WorkspaceManager {
     }
     this.opencodeAuth.set(id, { username: opencodeUsername, password: opencodePassword, authorization })
 
+    let finalOpencodeConfigDir = this.opencodeConfigDir
+    const userConfigDir = userEnvironment.OPENCODE_CONFIG_DIR
+
+    if (userConfigDir && fs.existsSync(userConfigDir)) {
+      try {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codenomad-config-"))
+        fs.cpSync(userConfigDir, tempDir, { recursive: true })
+        fs.cpSync(this.opencodeConfigDir, tempDir, { recursive: true, force: true })
+        finalOpencodeConfigDir = tempDir
+        this.options.logger.info({ workspaceId: id, tempDir }, "Created hybrid config directory")
+      } catch (error) {
+        this.options.logger.error({ workspaceId: id, err: error }, "Failed to create hybrid config directory, falling back to default")
+      }
+    }
+
     const environment = {
       ...userEnvironment,
-      OPENCODE_CONFIG_DIR: this.opencodeConfigDir,
+      OPENCODE_CONFIG_DIR: finalOpencodeConfigDir,
       CODENOMAD_INSTANCE_ID: id,
       CODENOMAD_BASE_URL: this.options.getServerBaseUrl(),
       ...(this.options.nodeExtraCaCertsPath ? { NODE_EXTRA_CA_CERTS: this.options.nodeExtraCaCertsPath } : {}),
