@@ -13,6 +13,7 @@ import { Logger } from "../logger"
 import {
   buildOpencodeConfigContent,
   getCodeNomadPluginUrl,
+  readOpencodeConfigContentFromDir,
   resolveExistingOpencodeConfigContent,
 } from "../opencode-plugin.js"
 import {

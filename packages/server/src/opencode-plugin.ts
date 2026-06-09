@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "fs"
+import { existsSync, readdirSync, readFileSync } from "fs"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { createLogger } from "./logger"
@@ -67,6 +67,34 @@ export function resolveExistingOpencodeConfigContent(userEnvironment: Record<str
   }
   return normalizeConfigContentValue(process.env.OPENCODE_CONFIG_CONTENT)
 }
+
+/**
+ * Read the OpenCode config from a legacy `OPENCODE_CONFIG_DIR` directory by
+ * trying the well-known config filenames. Returns the first readable file
+ * contents (JSON or JSONC), or undefined if the directory has no recognizable
+ * config. Used to preserve directory-based configuration setups that relied
+ * on the pre-0.17 behavior of pointing the opencode process at a user-owned
+ * config directory.
+ */
+export function readOpencodeConfigContentFromDir(configDir: string): string | undefined {
+  if (!configDir || !existsSync(configDir)) {
+    return undefined
+  }
+  for (const candidate of OPENCODE_CONFIG_FILE_NAMES) {
+    const filePath = path.join(configDir, candidate)
+    if (!existsSync(filePath)) {
+      continue
+    }
+    try {
+      return readFileSync(filePath, "utf8")
+    } catch (error) {
+      log.warn({ configDir, filePath, err: error }, "Failed to read opencode config file")
+    }
+  }
+  return undefined
+}
+
+const OPENCODE_CONFIG_FILE_NAMES = ["opencode.json", "opencode.jsonc", "config.json", "config.jsonc"]
 
 function toNpmFileSpecifier(filePath: string): string {
   return `${pluginPackageName}@file:${filePath.replace(/\\/g, "/")}`

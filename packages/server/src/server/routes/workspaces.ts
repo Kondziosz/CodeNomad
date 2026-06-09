@@ -253,11 +253,11 @@ export function registerWorkspaceRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.get<{
     Params: { id: string }
   }>("/api/workspaces/:id/git-graph", async (request, reply) => {
-    try {
-      return { graph: deps.workspaceManager.getGitGraph(request.params.id) }
-    } catch (error) {
-      return handleWorkspaceError(error, reply)
-    }
+    // Git graph endpoint was removed in v0.17.0; the UI now uses a native
+    // git log renderer that does not require server-side support. This route
+    // is kept as a stable 410 Gone so old clients receive an explicit signal
+    // instead of a confusing 404.
+    reply.code(410).send({ error: "git-graph endpoint removed; use client-side git log" })
   })
 }
 
