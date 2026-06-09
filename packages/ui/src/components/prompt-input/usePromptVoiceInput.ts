@@ -3,6 +3,7 @@ import { showAlertDialog } from "../../stores/alerts"
 import { loadSpeechCapabilities, speechCapabilities } from "../../stores/speech"
 import { serverApi } from "../../lib/api-client"
 import { useI18n } from "../../lib/i18n"
+import { isElectronHost } from "../../lib/runtime-env"
 
 interface UsePromptVoiceInputOptions {
   prompt: Accessor<string>
@@ -88,6 +89,14 @@ export function usePromptVoiceInput(options: UsePromptVoiceInputOptions) {
     try {
       recordedChunks = []
       shouldTranscribe = true
+
+      if (isElectronHost()) {
+        const granted = await (window as Window & { electronAPI?: ElectronAPI }).electronAPI?.requestMicrophoneAccess?.()
+        if (granted && !granted.granted) {
+          throw new Error(t("promptInput.voiceInput.error.permissionDenied"))
+        }
+      }
+
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
       mediaRecorder = createRecorder(mediaStream)
 
@@ -160,18 +169,25 @@ export function usePromptVoiceInput(options: UsePromptVoiceInputOptions) {
     const textarea = options.getTextarea()
     const start = textarea ? textarea.selectionStart : current.length
     const end = textarea ? textarea.selectionEnd : current.length
+    const wasCursorAtEnd = end === current.length
+    const wasScrolledToBottom = textarea
+      ? textarea.scrollHeight - (textarea.scrollTop + textarea.clientHeight) <= 4
+      : false
     const before = current.slice(0, start)
     const after = current.slice(end)
-    const prefix = before.length > 0 && !/\s$/.test(before) ? " " : ""
-    const suffix = after.length > 0 && !/^\s/.test(after) ? " " : ""
+    const prefix = ""
+    const suffix = after.length > 0 ? (/^\s/.test(after) ? "" : " ") : " "
     const nextValue = `${before}${prefix}${text}${suffix}${after}`
-    const cursor = before.length + prefix.length + text.length
+    const cursor = before.length + prefix.length + text.length + suffix.length
 
     options.setPrompt(nextValue)
     if (textarea) {
       setTimeout(() => {
         textarea.focus()
         textarea.setSelectionRange(cursor, cursor)
+        if (wasCursorAtEnd || wasScrolledToBottom) {
+          textarea.scrollTop = textarea.scrollHeight
+        }
       }, 0)
     }
   }

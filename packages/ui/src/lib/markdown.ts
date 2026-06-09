@@ -13,9 +13,144 @@ let highlighterPromise: Promise<Highlighter> | null = null
 let currentTheme: "light" | "dark" = "light"
 let isInitialized = false
 let highlightSuppressed = false
+let escapeRawHtmlEnabled = false
 let rendererSetup = false
 let shikiModulePromise: Promise<typeof import("shiki/bundle/full")> | null = null
 let bundledLanguagesCache: typeof import("shiki/bundle/full")["bundledLanguages"] | null = null
+
+// Math rendering is handled by marked-katex-extension (registered in setupRenderer).
+// Delimiter rules, boundaries, CJK punctuation, and block/inline rendering are
+// all delegated to the maintained extension so we avoid ~200 lines of fragile
+// hand-rolled tokenizer code.
+
+const ALLOWED_RAW_HTML_TAGS = new Set([
+  "a",
+  "blockquote",
+  "br",
+  "code",
+  "del",
+  "details",
+  "div",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "img",
+  "kbd",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "span",
+  "strong",
+  "sub",
+  "summary",
+  "sup",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+])
+
+const DROP_RAW_HTML_TAGS = new Set(["script", "style", "iframe", "object", "embed", "meta", "link"])
+
+function sanitizeUrlAttribute(tagName: string, attrName: string, value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  if (attrName === "src" && tagName === "img") {
+    if (/^(https?:|data:image\/|\/|\.\/|\.\.\/|#)/i.test(trimmed)) return trimmed
+    return null
+  }
+
+  if (attrName === "href" && tagName === "a") {
+    if (/^(https?:|mailto:|\/|\.\/|\.\.\/|#)/i.test(trimmed)) return trimmed
+    return null
+  }
+
+  return null
+}
+
+function sanitizeRawHtmlFragment(html: string): string {
+  const decoded = decodeHtmlEntities(html)
+  if (typeof document === "undefined") {
+    return escapeHtml(decoded)
+  }
+
+  const template = document.createElement("template")
+  template.innerHTML = decoded
+
+  const sanitizeElement = (element: Element) => {
+    const tagName = element.tagName.toLowerCase()
+    if (DROP_RAW_HTML_TAGS.has(tagName)) {
+      element.remove()
+      return
+    }
+
+    if (!ALLOWED_RAW_HTML_TAGS.has(tagName)) {
+      element.replaceWith(...Array.from(element.childNodes))
+      return
+    }
+
+    for (const attr of Array.from(element.attributes)) {
+      const attrName = attr.name.toLowerCase()
+      if (attrName.startsWith("on") || attrName === "style") {
+        element.removeAttribute(attr.name)
+        continue
+      }
+
+      if (attrName === "href" || attrName === "src") {
+        const sanitized = sanitizeUrlAttribute(tagName, attrName, attr.value)
+        if (sanitized) {
+          element.setAttribute(attr.name, sanitized)
+          continue
+        }
+        element.removeAttribute(attr.name)
+        continue
+      }
+
+      if (
+        attrName === "alt" ||
+        attrName === "title" ||
+        attrName === "width" ||
+        attrName === "height" ||
+        attrName === "open" ||
+        attrName === "id" ||
+        attrName === "class" ||
+        attrName === "name" ||
+        attrName.startsWith("aria-") ||
+        attrName.startsWith("data-")
+      ) {
+        continue
+      }
+
+      element.removeAttribute(attr.name)
+    }
+
+    if (tagName === "a") {
+      element.setAttribute("target", "_blank")
+      element.setAttribute("rel", "noopener noreferrer")
+    }
+  }
+
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT)
+  const elements: Element[] = []
+  while (walker.nextNode()) {
+    elements.push(walker.currentNode as Element)
+  }
+  for (const element of elements.reverse()) {
+    sanitizeElement(element)
+  }
+
+  return template.innerHTML
+}
 
 // Track loaded languages and queue for on-demand loading
 const loadedLanguages = new Set<string>()
@@ -121,14 +256,7 @@ function resolveLanguage(token: string): { canonical: string | null; raw: string
   return { canonical: null, raw: normalized }
 }
 
-async function ensureLanguages(content: string) {
-  if (highlightSuppressed) {
-    return
-  }
-
-  // Extract code-fence language tokens via `marked` so we correctly handle code blocks
-  // that contain backticks (e.g. JS template literals). Regex-based fence scans tend
-  // to miss these and prevent languages from loading.
+function collectCodeFenceLanguages(content: string): string[] {
   const foundLanguages = new Set<string>()
   try {
     const tokens = marked.lexer(content) as any
@@ -140,9 +268,43 @@ async function ensureLanguages(content: string) {
       }
     })
   } catch {
-    // If tokenization fails for any reason, skip language preloading.
+    return []
+  }
+
+  return [...foundLanguages]
+}
+
+export function hasPendingCodeHighlight(content: string): boolean {
+  const languages = collectCodeFenceLanguages(content)
+  for (const token of languages) {
+    const rawToken = normalizeLanguageToken(token)
+    if (!rawToken || rawToken === "text") {
+      continue
+    }
+
+    const { canonical, raw } = resolveLanguage(token)
+    const langKey = canonical || raw
+    if (langKey === "text" || raw === "text") {
+      continue
+    }
+
+    if (!highlighter || !loadedLanguages.has(langKey)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+async function ensureLanguages(content: string) {
+  if (highlightSuppressed) {
     return
   }
+
+  // Extract code-fence language tokens via `marked` so we correctly handle code blocks
+  // that contain backticks (e.g. JS template literals). Regex-based fence scans tend
+  // to miss these and prevent languages from loading.
+  const foundLanguages = collectCodeFenceLanguages(content)
 
   // Queue language loading tasks
   for (const token of foundLanguages) {
@@ -221,6 +383,12 @@ function setupRenderer(isDark: boolean) {
   
   marked.use(markedKatex({ throwOnError: false, output: "html" }))
 
+  marked.use(markedKatex({
+    throwOnError: false,
+    nonStandard: true,
+    strict: "ignore",
+  }))
+
   const renderer = new marked.Renderer()
 
   renderer.code = (code: string, lang: string | undefined) => {
@@ -289,6 +457,14 @@ function setupRenderer(isDark: boolean) {
     return `<code class="inline-code">${escapeHtml(decoded)}</code>`
   }
 
+  renderer.html = (html: string) => {
+    if (!escapeRawHtmlEnabled) {
+      return html
+    }
+
+    return sanitizeRawHtmlFragment(html)
+  }
+
   marked.use({ renderer })
   rendererSetup = true
 }
@@ -312,6 +488,7 @@ export async function renderMarkdown(
   content: string,
   options?: {
     suppressHighlight?: boolean
+    escapeRawHtml?: boolean
   },
 ): Promise<string> {
   if (!isInitialized) {
@@ -320,6 +497,7 @@ export async function renderMarkdown(
   }
 
   const suppressHighlight = options?.suppressHighlight ?? false
+  const escapeRawHtml = options?.escapeRawHtml ?? false
   let decoded = decodeHtmlEntities(content)
 
   // Preprocess math to handle LLM variations safely without breaking markdown
@@ -335,13 +513,16 @@ export async function renderMarkdown(
   }
 
   const previousSuppressed = highlightSuppressed
+  const previousEscapeRawHtml = escapeRawHtmlEnabled
   highlightSuppressed = suppressHighlight
+  escapeRawHtmlEnabled = escapeRawHtml
 
   try {
     // Proceed to parse immediately - highlighting will be available on next render
     return marked.parse(decoded) as Promise<string>
   } finally {
     highlightSuppressed = previousSuppressed
+    escapeRawHtmlEnabled = previousEscapeRawHtml
   }
 }
 

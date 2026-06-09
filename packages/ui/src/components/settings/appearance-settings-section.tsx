@@ -17,9 +17,12 @@ export const AppearanceSettingsSection: Component = () => {
   const { themeMode, setThemeMode } = useTheme()
   const {
     preferences,
+    useTauriNativeEventTransport,
+    setUseTauriNativeEventTransport,
     updatePreferences,
     toggleShowThinkingBlocks,
     toggleKeyboardShortcutHints,
+    toggleShowMessageTimeline,
     toggleShowTimelineTools,
     toggleUsageMetrics,
     toggleAutoCleanupBlankSessions,
@@ -35,9 +38,12 @@ export const AppearanceSettingsSection: Component = () => {
   const behaviorSettings = createMemo(() =>
     getBehaviorSettings({
       preferences,
+      useTauriNativeEventTransport,
+      setUseTauriNativeEventTransport,
       updatePreferences,
       toggleShowThinkingBlocks,
       toggleKeyboardShortcutHints,
+      toggleShowMessageTimeline,
       toggleShowTimelineTools,
         toggleUsageMetrics,
         toggleAutoCleanupBlankSessions,

@@ -2,7 +2,8 @@ import { createSignal, onMount } from "solid-js"
 import type { Accessor } from "solid-js"
 import type { Preferences, ExpansionPreference, ToolInputsVisibilityPreference } from "../../stores/preferences"
 import { createCommandRegistry, type Command } from "../commands"
-import { instances, activeInstanceId, setActiveInstanceId } from "../../stores/instances"
+import { activeInstanceId } from "../../stores/instances"
+import { selectNextAppTab, selectPreviousAppTab } from "../../stores/app-tabs"
 import type { ClientPart, MessageInfo } from "../../types/message"
 import { getSessions, getVisibleSessionIds, setActiveSession, setActiveSessionFromList } from "../../stores/sessions"
 import { showAlertDialog } from "../../stores/alerts"
@@ -28,8 +29,11 @@ function splitKeywords(key: string): string[] {
 
 export interface UseCommandsOptions {
   preferences: Accessor<Preferences>
+  useTauriNativeEventTransport: Accessor<boolean>
+  setUseTauriNativeEventTransport: (next: boolean) => void
   toggleShowThinkingBlocks: () => void
   toggleKeyboardShortcutHints: () => void
+  toggleShowMessageTimeline: () => void
   toggleShowTimelineTools: () => void
   toggleUsageMetrics: () => void
   toggleAutoCleanupBlankSessions: () => void
@@ -41,6 +45,7 @@ export interface UseCommandsOptions {
   setThinkingBlocksExpansion: (mode: ExpansionPreference) => void
   setToolInputsVisibility: (mode: ToolInputsVisibilityPreference) => void
   handleNewInstanceRequest: () => void
+  handleCloseActiveTab: () => Promise<void>
   handleCloseInstance: (instanceId: string) => Promise<void>
   handleNewSession: (instanceId: string) => Promise<void>
   handleCloseSession: (instanceId: string, sessionId: string) => Promise<void>
@@ -90,9 +95,7 @@ export function useCommands(options: UseCommandsOptions) {
       keywords: () => splitKeywords("commands.closeInstance.keywords"),
       shortcut: { key: "W", meta: true },
       action: async () => {
-        const instance = activeInstance()
-        if (!instance) return
-        await options.handleCloseInstance(instance.id)
+        await options.handleCloseActiveTab()
       },
     })
 
@@ -103,13 +106,7 @@ export function useCommands(options: UseCommandsOptions) {
       category: "Instance",
       keywords: () => splitKeywords("commands.nextInstance.keywords"),
       shortcut: { key: "]", meta: true },
-      action: () => {
-        const ids = Array.from(instances().keys())
-        if (ids.length <= 1) return
-        const current = ids.indexOf(activeInstanceId() || "")
-        const next = (current + 1) % ids.length
-        if (ids[next]) setActiveInstanceId(ids[next])
-      },
+      action: () => selectNextAppTab(),
     })
 
     commandRegistry.register({
@@ -119,13 +116,7 @@ export function useCommands(options: UseCommandsOptions) {
       category: "Instance",
       keywords: () => splitKeywords("commands.previousInstance.keywords"),
       shortcut: { key: "[", meta: true },
-      action: () => {
-        const ids = Array.from(instances().keys())
-        if (ids.length <= 1) return
-        const current = ids.indexOf(activeInstanceId() || "")
-        const prev = current <= 0 ? ids.length - 1 : current - 1
-        if (ids[prev]) setActiveInstanceId(ids[prev])
-      },
+      action: () => selectPreviousAppTab(),
     })
 
     commandRegistry.register({
@@ -430,8 +421,11 @@ export function useCommands(options: UseCommandsOptions) {
 
     registerBehaviorCommands((command) => commandRegistry.register(command), {
       preferences: options.preferences,
+      useTauriNativeEventTransport: options.useTauriNativeEventTransport,
+      setUseTauriNativeEventTransport: options.setUseTauriNativeEventTransport,
       toggleShowThinkingBlocks: options.toggleShowThinkingBlocks,
       toggleKeyboardShortcutHints: options.toggleKeyboardShortcutHints,
+      toggleShowMessageTimeline: options.toggleShowMessageTimeline,
       toggleShowTimelineTools: options.toggleShowTimelineTools,
       toggleUsageMetrics: options.toggleUsageMetrics,
       toggleAutoCleanupBlankSessions: options.toggleAutoCleanupBlankSessions,

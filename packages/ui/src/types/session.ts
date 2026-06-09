@@ -3,9 +3,8 @@ import type {
   Agent as SDKAgent,
   Provider as SDKProvider,
   Model as SDKModel,
-} from "@opencode-ai/sdk"
-import type { SessionStatus as SDKSessionStatus } from "@opencode-ai/sdk/v2/client"
-import type { FileDiff } from "@opencode-ai/sdk/v2/client"
+  SessionStatus as SDKSessionStatus,
+} from "@opencode-ai/sdk/v2"
 
 // Export SDK types for external use
 export type { 
@@ -13,9 +12,32 @@ export type {
   Agent as SDKAgent, 
   Provider as SDKProvider,
   Model as SDKModel
-} from "@opencode-ai/sdk"
+} from "@opencode-ai/sdk/v2"
 
 export type SessionStatus = "idle" | "working" | "compacting"
+
+export interface SessionRetryState {
+  attempt: number
+  message: string
+  next: number
+}
+
+export function getIdleSinceForStatusTransition(
+  previousStatus: SessionStatus | null | undefined,
+  nextStatus: SessionStatus,
+  previousIdleSince: number | null | undefined,
+  now = Date.now(),
+): number | null {
+  if (nextStatus !== "idle") {
+    return null
+  }
+
+  if (previousStatus && previousStatus !== "idle") {
+    return now
+  }
+
+  return previousIdleSince ?? null
+}
 
 export function mapSdkSessionStatus(status: SDKSessionStatus | null | undefined): SessionStatus {
   if (!status || status.type === "idle") {
@@ -26,9 +48,21 @@ export function mapSdkSessionStatus(status: SDKSessionStatus | null | undefined)
   return "working"
 }
 
+export function mapSdkSessionRetry(status: SDKSessionStatus | null | undefined): SessionRetryState | null {
+  if (!status || status.type !== "retry") {
+    return null
+  }
+
+  return {
+    attempt: typeof status.attempt === "number" ? status.attempt : 1,
+    message: typeof status.message === "string" ? status.message : "",
+    next: typeof status.next === "number" ? status.next : Date.now(),
+  }
+}
+
 // Our client-specific Session interface extending SDK Session
 export interface Session
-  extends Omit<import("@opencode-ai/sdk").Session, "projectID" | "directory" | "parentID"> {
+  extends Omit<SDKSession, "projectID" | "directory" | "parentID" | "slug" | "model"> {
   instanceId: string // Client-specific field
   parentId: string | null // Client-specific field (override parentID)
   agent: string // Client-specific field
@@ -40,12 +74,14 @@ export interface Session
   pendingPermission?: boolean // Indicates if session is waiting on user permission
   pendingQuestion?: boolean // Indicates if session is waiting on user input
   status: SessionStatus // Single source of truth for session status
-  diff?: FileDiff[] // Session-level file diffs (hydrated via session.diff)
+  retry?: SessionRetryState | null // Retry metadata for transient backoff states
+  idleSince?: number | null // Timestamp set when work finished but the session has not been viewed yet
+  metadata?: Record<string, unknown> // Session metadata persisted by OpenCode
 }
 
 // Adapter function to convert SDK Session to client Session
 export function createClientSession(
-  sdkSession: import("@opencode-ai/sdk").Session,
+  sdkSession: SDKSession,
   instanceId: string,
   agent: string = "",
   model: { providerId: string; modelId: string } = { providerId: "", modelId: "" },
@@ -58,6 +94,7 @@ export function createClientSession(
     agent,
     model,
     status,
+    idleSince: null,
   }
 }
 
@@ -73,6 +110,30 @@ export interface Agent {
     providerId: string
     modelId: string
   }
+}
+
+/**
+ * Matches OpenCode TUI's primary-agent visibility rule: visible iff not a subagent and not hidden.
+ */
+export function isSelectablePrimaryAgent(agent: Agent): boolean {
+  return !agent.hidden && agent.mode !== "subagent"
+}
+
+export function getSelectableAgentsForSession(
+  agentList: Agent[],
+  currentAgentName: string,
+  isChildSession: boolean,
+): Agent[] {
+  if (!isChildSession) {
+    return agentList.filter(isSelectablePrimaryAgent)
+  }
+
+  const visibleAgents = agentList.filter((agent) => !agent.hidden)
+  const currentHiddenAgent = agentList.find((agent) => agent.hidden && agent.name === currentAgentName)
+
+  return currentHiddenAgent && !visibleAgents.some((agent) => agent.name === currentHiddenAgent.name)
+    ? [...visibleAgents, currentHiddenAgent]
+    : visibleAgents
 }
 
 // Our client-specific Provider interface (simplified version of SDK Provider)

@@ -2,8 +2,9 @@ import { For, Show, type Accessor, type Component } from "solid-js"
 import type { ToolState } from "@opencode-ai/sdk/v2"
 import { Accordion } from "@kobalte/core"
 import { Tooltip } from "@kobalte/core/tooltip"
+import Switch from "@suid/material/Switch"
 
-import { ChevronDown, Info, TerminalSquare, Trash2, XOctagon } from "lucide-solid"
+import { BellRing, ChevronDown, Info, TerminalSquare, Trash2, XOctagon } from "lucide-solid"
 
 import type { Instance } from "../../../../../types/instance"
 import type { BackgroundProcess } from "../../../../../../../server/src/api-types"
@@ -12,6 +13,8 @@ import type { Session } from "../../../../../types/session"
 import ContextUsagePanel from "../../../../session/context-usage-panel"
 import { TodoListView } from "../../../../tool-call/renderers/todo"
 import InstanceServiceStatus from "../../../../instance-service-status"
+import { togglePermissionAutoAcceptForSession } from "../../../../../stores/instances"
+import { isPermissionAutoAcceptEnabled } from "../../../../../stores/permission-auto-accept"
 
 interface StatusTabProps {
   t: (key: string, vars?: Record<string, any>) => string
@@ -21,7 +24,6 @@ interface StatusTabProps {
 
   activeSessionId: Accessor<string | null>
   activeSession: Accessor<Session | null>
-  activeSessionDiffs: Accessor<any[] | undefined>
 
   latestTodoState: Accessor<ToolState | null>
 
@@ -33,86 +35,35 @@ interface StatusTabProps {
   expandedItems: Accessor<string[]>
   onExpandedItemsChange: (values: string[]) => void
 
-  onOpenChangesTab: (file?: string) => void
 }
 
 const StatusTab: Component<StatusTabProps> = (props) => {
   const isSectionExpanded = (id: string) => props.expandedItems().includes(id)
 
-  const renderStatusSessionChanges = () => {
-    const sessionId = props.activeSessionId()
-    if (!sessionId || sessionId === "info") {
+  const renderYoloModeSection = () => {
+    const session = props.activeSession()
+    if (!session) {
       return (
         <div class="right-panel-empty right-panel-empty--left">
-          <span class="text-xs">{props.t("instanceShell.sessionChanges.noSessionSelected")}</span>
+          <span class="text-xs">{props.t("instanceShell.yoloMode.noSessionSelected")}</span>
         </div>
       )
     }
-
-    const diffs = props.activeSessionDiffs()
-    if (diffs === undefined) {
-      return (
-        <div class="right-panel-empty right-panel-empty--left">
-          <span class="text-xs">{props.t("instanceShell.sessionChanges.loading")}</span>
-        </div>
-      )
-    }
-
-    if (!Array.isArray(diffs) || diffs.length === 0) {
-      return (
-        <div class="right-panel-empty right-panel-empty--left">
-          <span class="text-xs">{props.t("instanceShell.sessionChanges.empty")}</span>
-        </div>
-      )
-    }
-
-    const sorted = [...diffs].sort((a, b) => String(a.file || "").localeCompare(String(b.file || "")))
-    const totals = sorted.reduce(
-      (acc, item) => {
-        acc.additions += typeof item.additions === "number" ? item.additions : 0
-        acc.deletions += typeof item.deletions === "number" ? item.deletions : 0
-        return acc
-      },
-      { additions: 0, deletions: 0 },
-    )
 
     return (
-      <div class="flex flex-col gap-3 min-h-0">
-        <div class="flex items-center justify-between gap-2 text-[11px] text-secondary">
-          <span>{props.t("instanceShell.sessionChanges.filesChanged", { count: sorted.length })}</span>
-          <span class="flex items-center gap-2">
-            <span style={{ color: "var(--session-status-idle-fg)" }}>{`+${totals.additions}`}</span>
-            <span style={{ color: "var(--session-status-working-fg)" }}>{`-${totals.deletions}`}</span>
-          </span>
-        </div>
-
-        <div class="rounded-md border border-base bg-surface-secondary p-2 max-h-[40vh] overflow-y-auto">
-          <div class="flex flex-col">
-            <For each={sorted}>
-              {(item) => (
-                <button
-                  type="button"
-                  class="border-b border-base last:border-b-0 text-left hover:bg-surface-muted rounded-sm"
-                  onClick={() => props.onOpenChangesTab(item.file)}
-                  title={props.t("instanceShell.sessionChanges.actions.show")}
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <div
-                      class="text-xs font-mono text-primary min-w-0 flex-1 overflow-hidden whitespace-nowrap"
-                      title={item.file}
-                      style="text-overflow: ellipsis; direction: rtl; text-align: left; unicode-bidi: plaintext;"
-                    >
-                      {item.file}
-                    </div>
-                    <div class="flex items-center gap-2 text-[11px] flex-shrink-0">
-                      <span style={{ color: "var(--session-status-idle-fg)" }}>{`+${item.additions}`}</span>
-                      <span style={{ color: "var(--session-status-working-fg)" }}>{`-${item.deletions}`}</span>
-                    </div>
-                  </div>
-                </button>
-              )}
-            </For>
+      <div class="rounded-md border border-base bg-surface-secondary px-3 py-2">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-primary">{props.t("instanceShell.yoloMode.title")}</div>
+            <p class="mt-1 text-xs text-secondary">{props.t("instanceShell.yoloMode.description")}</p>
           </div>
+          <Switch
+            checked={isPermissionAutoAcceptEnabled(props.instanceId, session.id)}
+            color="warning"
+            size="small"
+            inputProps={{ "aria-label": props.t("instanceShell.yoloMode.title") }}
+            onChange={() => togglePermissionAutoAcceptForSession(props.instanceId, session.id)}
+          />
         </div>
       </div>
     )
@@ -156,6 +107,24 @@ const StatusTab: Component<StatusTabProps> = (props) => {
               <div class="status-process-header">
                 <span class="status-process-title">{process.title}</span>
                 <div class="status-process-meta">
+                  <span
+                    classList={{
+                      "text-success": Boolean(process.notifyEnabled),
+                      "text-tertiary": !process.notifyEnabled,
+                    }}
+                    aria-label={props.t(
+                      process.notifyEnabled
+                        ? "instanceShell.backgroundProcesses.notify.enabled"
+                        : "instanceShell.backgroundProcesses.notify.disabled",
+                    )}
+                    title={props.t(
+                      process.notifyEnabled
+                        ? "instanceShell.backgroundProcesses.notify.enabled"
+                        : "instanceShell.backgroundProcesses.notify.disabled",
+                    )}
+                  >
+                    <BellRing class="h-3.5 w-3.5" />
+                  </span>
                   <span>{props.t("instanceShell.backgroundProcesses.status", { status: process.status })}</span>
                   <Show when={typeof process.outputSizeBytes === "number"}>
                     <span>
@@ -205,10 +174,10 @@ const StatusTab: Component<StatusTabProps> = (props) => {
 
   const statusSections = [
     {
-      id: "session-changes",
-      labelKey: "instanceShell.rightPanel.sections.sessionChanges",
-      tooltipKey: "instanceShell.rightPanel.sections.sessionChanges.tooltip",
-      render: renderStatusSessionChanges,
+      id: "yolo-mode",
+      labelKey: "instanceShell.rightPanel.sections.yoloMode",
+      tooltipKey: "instanceShell.rightPanel.sections.yoloMode.tooltip",
+      render: renderYoloModeSection,
     },
     {
       id: "plan",
@@ -281,29 +250,23 @@ const StatusTab: Component<StatusTabProps> = (props) => {
         <For each={statusSections}>
           {(section) => (
             <Accordion.Item value={section.id} class="right-panel-accordion-item">
-              <Accordion.Header>
+              <Accordion.Header class="right-panel-accordion-header-row">
                 <Accordion.Trigger class="right-panel-accordion-trigger">
                   <span class="section-left">
-                    <Tooltip openDelay={200} gutter={4} placement="top">
-                      <Tooltip.Trigger
-                        class="section-info-trigger"
-                        aria-label={props.t(section.tooltipKey)}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Info class="section-info-icon" />
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content class="section-info-tooltip">
-                          {props.t(section.tooltipKey)}
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip>
                     <span class="section-label">{props.t(section.labelKey)}</span>
                   </span>
                   <ChevronDown
                     class={`right-panel-accordion-chevron ${isSectionExpanded(section.id) ? "right-panel-accordion-chevron-expanded" : ""}`}
                   />
                 </Accordion.Trigger>
+                <Tooltip openDelay={200} gutter={4} placement="top">
+                  <Tooltip.Trigger as="button" type="button" class="section-info-trigger" aria-label={props.t(section.tooltipKey)}>
+                    <Info class="section-info-icon" />
+                  </Tooltip.Trigger>
+                  <Tooltip.Portal>
+                    <Tooltip.Content class="section-info-tooltip">{props.t(section.tooltipKey)}</Tooltip.Content>
+                  </Tooltip.Portal>
+                </Tooltip>
               </Accordion.Header>
               <Accordion.Content class="right-panel-accordion-content">{section.render()}</Accordion.Content>
             </Accordion.Item>

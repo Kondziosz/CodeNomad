@@ -49,6 +49,18 @@
   cursor: not-allowed;
 }
 
+.tool-call-header-label > .action-overflow-trigger {
+  display: none;
+}
+
+.session-center-column[data-session-center-width="narrow"] .tool-call-header-label[data-action-overflow="true"] .tool-call-header-actions {
+  display: none;
+}
+
+.session-center-column[data-session-center-width="narrow"] .tool-call-header-label[data-action-overflow="true"] > .action-overflow-trigger {
+  display: inline-flex;
+}
+
 .tool-call-header-label .tool-call-icon {
   @apply text-base;
 }
@@ -149,6 +161,19 @@
 
 .tool-call-header-input[aria-pressed="true"] {
   color: var(--text-primary);
+}
+
+.tool-call-header > .action-overflow-trigger {
+  display: none;
+}
+
+.session-center-column[data-session-center-width="narrow"] .tool-call-header[data-action-overflow="true"] > .tool-call-header-input,
+.session-center-column[data-session-center-width="narrow"] .tool-call-header[data-action-overflow="true"] > .tool-call-header-copy:not(.action-overflow-trigger) {
+  display: none;
+}
+
+.session-center-column[data-session-center-width="narrow"] .tool-call-header[data-action-overflow="true"] > .action-overflow-trigger {
+  display: inline-flex;
 }
 
 .tool-call-header-status {
@@ -321,6 +346,7 @@
 
 .tool-call-diff-shell {
   padding: 0;
+  scrollbar-gutter: auto;
 }
 
 .tool-call-diff-viewer {
@@ -343,6 +369,8 @@
 .tool-call-diff-shell .tool-call-diff-viewer {
   max-height: none;
   overflow: visible;
+  width: 100%;
+  min-width: 100%;
 }
 
 .tool-call-diff-toolbar-label {
@@ -487,6 +515,40 @@
   margin-inline-end: 0.25rem;
 }
 
+.tool-call-permission-reject-reason {
+  @apply flex flex-col gap-2;
+  margin-top: 0.75rem;
+}
+
+.tool-call-permission-reject-label {
+  @apply text-sm;
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+}
+
+.tool-call-permission-reject-textarea {
+  width: 100%;
+  min-height: 5rem;
+  resize: vertical;
+  background-color: var(--surface-code);
+  border: 1px solid var(--tool-call-border-color, var(--border-base));
+  border-radius: 0.5rem;
+  color: var(--text-primary);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.tool-call-permission-reject-textarea:focus {
+  outline: none;
+  border-color: var(--status-warning);
+}
+
+.tool-call-permission-reject-hint {
+  @apply text-xs text-muted;
+  margin: 0;
+}
+
 .tool-call-permission-queued-text {
   @apply text-sm text-muted;
 }
@@ -511,6 +573,84 @@
 .tool-call-diff-viewer .diff-line-num {
   color: var(--text-secondary);
   font-size: var(--font-size-xs);
+}
+
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-content,
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-hunk-content,
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-old-content,
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-new-content {
+  padding-right: 0 !important;
+}
+
+.tool-call-diff-shell[data-diff-mode="unified"] .tool-call-diff-viewer .diff-line-num {
+  padding-left: 1px !important;
+  padding-right: 1px !important;
+  text-align: left !important;
+}
+
+.tool-call-diff-shell[data-diff-mode="unified"] .tool-call-diff-viewer .unified-diff-table {
+  table-layout: fixed;
+}
+
+.tool-call-diff-shell[data-diff-mode="unified"] .tool-call-diff-viewer .unified-diff-table-num-col {
+  width: auto !important;
+}
+
+.tool-call-diff-shell[data-diff-mode="unified"] .tool-call-diff-viewer .tool-call-diff-compact-line-number {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-old-num,
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-new-num,
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-hunk-action {
+  padding-left: 2px !important;
+  padding-right: 2px !important;
+  text-align: left !important;
+}
+
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-old-num,
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-new-num,
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-old-num [data-line-num],
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-new-num [data-line-num] {
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+}
+
+.tool-call-diff-shell[data-diff-mode="split"] .tool-call-diff-viewer .diff-line-hunk-action {
+  padding-top: 1px !important;
+  padding-bottom: 1px !important;
+}
+
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-content-item {
+  padding-left: 1.1em !important;
+}
+
+.tool-call-diff-shell .tool-call-diff-viewer .diff-line-content-operator {
+  margin-left: -1.1em !important;
+  width: 0.9em !important;
+  min-width: 0.9em !important;
+  text-indent: 0 !important;
+}
+
+@media (max-width: 640px) {
+  .tool-call-diff-shell[data-diff-mode="unified"] .tool-call-diff-viewer .unified-diff-table-wrapper {
+    --diff-aside-width: 18px;
+  }
+
+  .tool-call-diff-shell .tool-call-diff-viewer .diff-line-content-item {
+    padding-left: 1.5em !important;
+  }
+
+  .tool-call-diff-shell .tool-call-diff-viewer .diff-line-content-operator {
+    margin-left: -1.5em !important;
+    width: 1.1em !important;
+    min-width: 1.1em !important;
+  }
 }
 
 .tool-call-markdown .markdown-code-block {

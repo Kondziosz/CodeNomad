@@ -1,5 +1,6 @@
 import { BrowserWindow, Notification, dialog, ipcMain, powerSaveBlocker, type OpenDialogOptions } from "electron"
 import fs from "fs"
+import { requestMicrophoneAccess } from "./permissions"
 import type { CliProcessManager, CliStatus } from "./process-manager"
 
 let wakeLockId: number | null = null
@@ -9,6 +10,7 @@ interface DialogOpenRequest {
   title?: string
   defaultPath?: string
   filters?: Array<{ name?: string; extensions: string[] }>
+  multiple?: boolean
 }
 
 interface DialogOpenResult {
@@ -46,6 +48,9 @@ export function setupCliIPC(mainWindow: BrowserWindow, cliManager: CliProcessMan
   ipcMain.handle("dialog:open", async (_, request: DialogOpenRequest): Promise<DialogOpenResult> => {
     const properties: OpenDialogOptions["properties"] =
       request.mode === "directory" ? ["openDirectory", "createDirectory"] : ["openFile"]
+    if (request.mode === "file" && request.multiple) {
+      properties.push("multiSelections")
+    }
 
     const filters = request.filters?.map((filter) => ({
       name: filter.name ?? "Files",
@@ -91,7 +96,7 @@ export function setupCliIPC(mainWindow: BrowserWindow, cliManager: CliProcessMan
         return { enabled: true }
       }
       try {
-        wakeLockId = powerSaveBlocker.start("prevent-display-sleep")
+        wakeLockId = powerSaveBlocker.start("prevent-app-suspension")
       } catch {
         wakeLockId = null
         return { enabled: false }
@@ -110,6 +115,33 @@ export function setupCliIPC(mainWindow: BrowserWindow, cliManager: CliProcessMan
     }
     return { enabled: false }
   })
+
+  ipcMain.handle(
+    "media:requestMicrophoneAccess",
+    async (): Promise<{ granted: boolean }> => ({ granted: await requestMicrophoneAccess() }),
+  )
+
+  ipcMain.handle(
+    "remote:openWindow",
+    async (
+      _event,
+      payload: { id: string; name: string; baseUrl: string; skipTlsVerify: boolean },
+    ): Promise<{ ok: boolean }> => {
+      const opener = (mainWindow as BrowserWindow & {
+        __codenomadOpenRemoteWindow?: (payload: {
+          id: string
+          name: string
+          baseUrl: string
+          skipTlsVerify: boolean
+        }) => Promise<void>
+      }).__codenomadOpenRemoteWindow
+      if (!opener) {
+        throw new Error("Remote window opening is not available")
+      }
+      await opener(payload)
+      return { ok: true }
+    },
+  )
 
   ipcMain.handle(
     "notifications:show",

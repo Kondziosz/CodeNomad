@@ -1,6 +1,11 @@
 import { createContext, createMemo, createSignal, onMount, useContext } from "solid-js"
 import type { Accessor, ParentComponent } from "solid-js"
+import {
+  readUseTauriNativeEventTransportPreference,
+  writeUseTauriNativeEventTransportPreference,
+} from "../lib/desktop-event-transport-preference"
 import { storage, type OwnerBucket } from "../lib/storage"
+import type { RemoteServerProfile } from "../../../server/src/api-types"
 import {
   ensureInstanceConfigLoaded,
   getInstanceConfig,
@@ -28,6 +33,7 @@ export type DiffViewMode = "split" | "unified"
 export type ExpansionPreference = "expanded" | "collapsed"
 export type ToolInputsVisibilityPreference = "hidden" | "collapsed" | "expanded"
 export type ListeningMode = "local" | "all"
+export type ServerLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR"
 export type SpeechProviderPreference = "openai-compatible"
 export type SpeechPlaybackMode = "streaming" | "buffered"
 export type SpeechTtsFormat = "mp3" | "wav" | "opus" | "aac"
@@ -52,7 +58,9 @@ export interface UiSettings {
   showThinkingBlocks: boolean
   showKeyboardShortcutHints: boolean
   thinkingBlocksExpansion: ExpansionPreference
+  showMessageTimeline: boolean
   showTimelineTools: boolean
+  holdLongAssistantReplies: boolean
   promptSubmitOnEnter: boolean
   showPromptVoiceInput: boolean
   locale?: string
@@ -62,6 +70,7 @@ export interface UiSettings {
   toolInputsVisibility: ToolInputsVisibilityPreference
   showUsageMetrics: boolean
   autoCleanupBlankSessions: boolean
+  keepUnseenSubagentIdleStatus: boolean
 
   // OS notifications
   osNotificationsEnabled: boolean
@@ -83,6 +92,7 @@ export interface OpenCodeBinary {
 export interface RecentFolder {
   path: string
   lastAccessed: number
+  projectName?: string
 }
 
 export type ThemePreference = "light" | "dark" | "system"
@@ -94,7 +104,9 @@ interface UiConfigBucket {
 
 interface ServerConfigBucket {
   listeningMode?: ListeningMode
+  logLevel?: ServerLogLevel
   environmentVariables?: Record<string, string>
+  secureEnvVars?: string[]
   opencodeBinary?: string
   speech?: Partial<SpeechSettings>
 }
@@ -102,6 +114,7 @@ interface ServerConfigBucket {
 interface UiStateBucket {
   recentFolders?: RecentFolder[]
   opencodeBinaries?: OpenCodeBinary[]
+  remoteServers?: RemoteServerProfile[]
   models?: {
     recents?: ModelPreference[]
     favorites?: ModelPreference[]
@@ -112,6 +125,7 @@ interface UiStateBucket {
 interface NormalizedUiState {
   recentFolders: RecentFolder[]
   opencodeBinaries: OpenCodeBinary[]
+  remoteServers: RemoteServerProfile[]
   models: {
     recents: ModelPreference[]
     favorites: ModelPreference[]
@@ -127,7 +141,9 @@ const defaultUiSettings: UiSettings = {
   showThinkingBlocks: false,
   showKeyboardShortcutHints: true,
   thinkingBlocksExpansion: "expanded",
+  showMessageTimeline: true,
   showTimelineTools: true,
+  holdLongAssistantReplies: true,
   promptSubmitOnEnter: false,
   showPromptVoiceInput: true,
   diffViewMode: "split",
@@ -136,6 +152,7 @@ const defaultUiSettings: UiSettings = {
   toolInputsVisibility: "collapsed",
   showUsageMetrics: true,
   autoCleanupBlankSessions: true,
+  keepUnseenSubagentIdleStatus: false,
 
   osNotificationsEnabled: false,
   osNotificationsAllowWhenVisible: false,
@@ -160,7 +177,9 @@ function normalizeUiSettings(input?: Partial<UiSettings> | null): UiSettings {
     showKeyboardShortcutHints:
       sanitized.showKeyboardShortcutHints ?? defaultUiSettings.showKeyboardShortcutHints,
     thinkingBlocksExpansion: sanitized.thinkingBlocksExpansion ?? defaultUiSettings.thinkingBlocksExpansion,
+    showMessageTimeline: sanitized.showMessageTimeline ?? defaultUiSettings.showMessageTimeline,
     showTimelineTools: sanitized.showTimelineTools ?? defaultUiSettings.showTimelineTools,
+    holdLongAssistantReplies: sanitized.holdLongAssistantReplies ?? defaultUiSettings.holdLongAssistantReplies,
     promptSubmitOnEnter: sanitized.promptSubmitOnEnter ?? defaultUiSettings.promptSubmitOnEnter,
     showPromptVoiceInput: sanitized.showPromptVoiceInput ?? defaultUiSettings.showPromptVoiceInput,
     locale: sanitized.locale ?? defaultUiSettings.locale,
@@ -173,6 +192,8 @@ function normalizeUiSettings(input?: Partial<UiSettings> | null): UiSettings {
         : defaultUiSettings.toolInputsVisibility,
     showUsageMetrics: sanitized.showUsageMetrics ?? defaultUiSettings.showUsageMetrics,
     autoCleanupBlankSessions: sanitized.autoCleanupBlankSessions ?? defaultUiSettings.autoCleanupBlankSessions,
+    keepUnseenSubagentIdleStatus:
+      sanitized.keepUnseenSubagentIdleStatus ?? defaultUiSettings.keepUnseenSubagentIdleStatus,
     osNotificationsEnabled: sanitized.osNotificationsEnabled ?? defaultUiSettings.osNotificationsEnabled,
     osNotificationsAllowWhenVisible:
       sanitized.osNotificationsAllowWhenVisible ?? defaultUiSettings.osNotificationsAllowWhenVisible,
@@ -237,9 +258,14 @@ function normalizeUiState(input?: UiStateBucket | null): NormalizedUiState {
       if (!f || typeof f !== "object") return null
       const p = (f as any).path
       const lastAccessed = (f as any).lastAccessed
+      const projectName = (f as any).projectName
       if (typeof p !== "string") return null
       const ts = typeof lastAccessed === "number" ? lastAccessed : Date.now()
-      return { path: p, lastAccessed: ts }
+      return {
+        path: p,
+        lastAccessed: ts,
+        ...(typeof projectName === "string" && projectName.trim() ? { projectName: projectName.trim() } : {}),
+      }
     }),
     opencodeBinaries: cloneArray<OpenCodeBinary>(source.opencodeBinaries, (b) => {
       if (!b || typeof b !== "object") return null
@@ -249,6 +275,29 @@ function normalizeUiState(input?: UiStateBucket | null): NormalizedUiState {
       const version = typeof (b as any).version === "string" ? (b as any).version : undefined
       const label = typeof (b as any).label === "string" ? (b as any).label : undefined
       return { path: p, version, label, lastUsed }
+    }),
+    remoteServers: cloneArray<RemoteServerProfile>(source.remoteServers, (server) => {
+      if (!server || typeof server !== "object") return null
+      const id = typeof (server as any).id === "string" ? (server as any).id.trim() : ""
+      const name = typeof (server as any).name === "string" ? (server as any).name.trim() : ""
+      const baseUrl = typeof (server as any).baseUrl === "string" ? (server as any).baseUrl.trim() : ""
+      if (!id || !name || !baseUrl) return null
+      const createdAt = typeof (server as any).createdAt === "string" ? (server as any).createdAt : new Date().toISOString()
+      const updatedAt = typeof (server as any).updatedAt === "string" ? (server as any).updatedAt : createdAt
+      const lastConnectedAt = typeof (server as any).lastConnectedAt === "string" ? (server as any).lastConnectedAt : undefined
+      return {
+        id,
+        name,
+        baseUrl,
+        skipTlsVerify: Boolean((server as any).skipTlsVerify),
+        createdAt,
+        updatedAt,
+        lastConnectedAt,
+      }
+    }).sort((a, b) => {
+      const left = a.lastConnectedAt ?? a.updatedAt
+      const right = b.lastConnectedAt ?? b.updatedAt
+      return right.localeCompare(left)
     }),
     models: {
       recents: cloneArray<ModelPreference>((source.models as any)?.recents, (m) => {
@@ -272,13 +321,23 @@ function normalizeUiState(input?: UiStateBucket | null): NormalizedUiState {
 
 function normalizeServerConfig(
   input?: ServerConfigBucket | null,
-): Required<Pick<ServerConfigBucket, "listeningMode" | "environmentVariables" | "opencodeBinary">> & { speech: SpeechSettings } {
+): Required<Pick<ServerConfigBucket, "listeningMode" | "logLevel" | "environmentVariables" | "opencodeBinary" | "secureEnvVars">> & { speech: SpeechSettings } {
   const source = input ?? {}
   const listeningMode = source.listeningMode === "all" ? "all" : "local"
+  const logLevel =
+    source.logLevel === "INFO" || source.logLevel === "WARN" || source.logLevel === "ERROR" || source.logLevel === "DEBUG"
+      ? source.logLevel
+      : "DEBUG"
   const opencodeBinary = typeof source.opencodeBinary === "string" && source.opencodeBinary.trim() ? source.opencodeBinary : "opencode"
   const environmentVariables = normalizeRecord(source.environmentVariables)
+  const secureEnvVars = normalizeSecureEnvVars(source.secureEnvVars)
   const speech = normalizeSpeechSettings(source.speech)
-  return { listeningMode, opencodeBinary, environmentVariables, speech }
+  return { listeningMode, logLevel, opencodeBinary, environmentVariables, secureEnvVars, speech }
+}
+
+function normalizeSecureEnvVars(input?: unknown): string[] {
+  if (!Array.isArray(input)) return []
+  return input.filter((item): item is string => typeof item === "string" && item.length > 0)
 }
 
 function getModelKey(model: { providerId: string; modelId: string }): string {
@@ -286,8 +345,13 @@ function getModelKey(model: { providerId: string; modelId: string }): string {
 }
 
 function buildRecentFolderList(folderPath: string, source: RecentFolder[]): RecentFolder[] {
+  const existing = source.find((f) => f.path === folderPath)
   const folders = source.filter((f) => f.path !== folderPath)
-  folders.unshift({ path: folderPath, lastAccessed: Date.now() })
+  folders.unshift({
+    path: folderPath,
+    lastAccessed: Date.now(),
+    ...(existing?.projectName ? { projectName: existing.projectName } : {}),
+  })
   return folders.slice(0, MAX_RECENT_FOLDERS)
 }
 
@@ -305,10 +369,50 @@ function buildBinaryList(binaryPath: string, version: string | undefined, source
   return [nextEntry, ...source].slice(0, 10)
 }
 
+interface RemoteServerProfileInput {
+  id?: string
+  name: string
+  baseUrl: string
+  skipTlsVerify: boolean
+}
+
+function buildRemoteServerProfile(input: RemoteServerProfileInput, source: RemoteServerProfile[]): RemoteServerProfile {
+  const existing = input.id ? source.find((entry) => entry.id === input.id) : undefined
+  const now = new Date().toISOString()
+  return {
+    id: existing?.id ?? input.id ?? createRandomId(),
+    name: input.name.trim(),
+    baseUrl: input.baseUrl.trim(),
+    skipTlsVerify: Boolean(input.skipTlsVerify),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    lastConnectedAt: existing?.lastConnectedAt,
+  }
+}
+
+function buildRemoteServerList(profile: RemoteServerProfile, source: RemoteServerProfile[]): RemoteServerProfile[] {
+  const remaining = source.filter((entry) => entry.id !== profile.id)
+  return [profile, ...remaining].sort((a, b) => {
+    const left = a.lastConnectedAt ?? a.updatedAt
+    const right = b.lastConnectedAt ?? b.updatedAt
+    return right.localeCompare(left)
+  })
+}
+
+function createRandomId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID()
+  }
+  return `remote-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 const [uiConfigBucket, setUiConfigBucket] = createSignal<UiConfigBucket>({})
 const [serverConfigBucket, setServerConfigBucket] = createSignal<ServerConfigBucket>({})
 const [uiStateBucket, setUiStateBucket] = createSignal<UiStateBucket>({})
 const [isLoaded, setIsLoaded] = createSignal(false)
+const [useTauriNativeEventTransport, setUseTauriNativeEventTransportSignal] = createSignal(
+  readUseTauriNativeEventTransportPreference(),
+)
 
 const uiSettings = createMemo<UiSettings>(() => normalizeUiSettings(uiConfigBucket().settings))
 const themePreference = createMemo<ThemePreference>(() => uiConfigBucket().theme ?? "system")
@@ -318,6 +422,7 @@ const uiState = createMemo(() => normalizeUiState(uiStateBucket()))
 const preferences = uiSettings
 const recentFolders = createMemo<RecentFolder[]>(() => uiState().recentFolders)
 const opencodeBinaries = createMemo<OpenCodeBinary[]>(() => uiState().opencodeBinaries)
+const remoteServers = createMemo<RemoteServerProfile[]>(() => uiState().remoteServers)
 
 let loadPromise: Promise<void> | null = null
 
@@ -356,6 +461,23 @@ async function patchConfigOwner(owner: string, patch: unknown) {
   if (owner === "server") setServerConfigBucket(updated as any)
 }
 
+function setUseTauriNativeEventTransport(enabled: boolean): void {
+  if (useTauriNativeEventTransport() === enabled) {
+    return
+  }
+
+  setUseTauriNativeEventTransportSignal(enabled)
+  writeUseTauriNativeEventTransportPreference(enabled)
+
+  void import("../lib/server-events")
+    .then(({ serverEvents }) => {
+      serverEvents.restart("desktop transport preference changed")
+    })
+    .catch((error) => {
+      log.error("Failed to restart backend events stream after desktop transport preference change", error)
+    })
+}
+
 async function patchStateOwner(owner: string, patch: unknown) {
   await ensureLoaded()
   const updated = await storage.patchStateOwner(owner, patch)
@@ -389,15 +511,52 @@ function updateEnvironmentVariables(envVars: Record<string, string>): void {
   )
 }
 
-function addEnvironmentVariable(key: string, value: string): void {
+function addEnvironmentVariable(key: string, value: string, secure: boolean = true): void {
   const current = serverSettings().environmentVariables
   updateEnvironmentVariables({ ...current, [key]: value })
+
+  const secureList = serverSettings().secureEnvVars
+  const upperKey = key.toUpperCase()
+  const exists = secureList.some((name) => name.toUpperCase() === upperKey)
+
+  if (secure) {
+    if (!exists) {
+      const next = [...secureList, key]
+      void patchConfigOwner("server", { secureEnvVars: next }).catch((error) =>
+        log.error("Failed to add secure env var", error),
+      )
+    }
+  } else {
+    if (exists) {
+      const next = secureList.filter((name) => name.toUpperCase() !== upperKey)
+      void patchConfigOwner("server", { secureEnvVars: next }).catch((error) =>
+        log.error("Failed to remove secure env var", error),
+      )
+    }
+  }
 }
 
 function removeEnvironmentVariable(key: string): void {
   const current = serverSettings().environmentVariables
   const { [key]: removed, ...rest } = current
   updateEnvironmentVariables(rest)
+}
+
+function isSecureEnvVar(key: string): boolean {
+  const secureList = serverSettings().secureEnvVars
+  return secureList.some((name) => name.toUpperCase() === key.toUpperCase())
+}
+
+function toggleSecureEnvVar(key: string): void {
+  const secureList = serverSettings().secureEnvVars
+  const upperKey = key.toUpperCase()
+  const exists = secureList.some((name) => name.toUpperCase() === upperKey)
+  const next = exists
+    ? secureList.filter((name) => name.toUpperCase() !== upperKey)
+    : [...secureList, key]
+  void patchConfigOwner("server", { secureEnvVars: next }).catch((error) =>
+    log.error("Failed to update secure env vars", error),
+  )
 }
 
 function updateLastUsedBinary(path: string): void {
@@ -407,6 +566,11 @@ function updateLastUsedBinary(path: string): void {
   // also bump lastUsed in state ui.opencodeBinaries
   const nextList = buildBinaryList(target, undefined, opencodeBinaries())
   void patchStateOwner("ui", { opencodeBinaries: nextList }).catch((error) => log.error("Failed to update binary list", error))
+}
+
+function updateLogLevel(level: ServerLogLevel): void {
+  const target = level ?? "DEBUG"
+  void patchConfigOwner("server", { logLevel: target }).catch((error) => log.error("Failed to set log level", error))
 }
 
 async function updateSpeechSettings(updates: SpeechSettingsUpdate): Promise<void> {
@@ -454,6 +618,41 @@ function addRecentFolder(folderPath: string): void {
 function removeRecentFolder(folderPath: string): void {
   const next = recentFolders().filter((f) => f.path !== folderPath)
   void patchStateOwner("ui", { recentFolders: next }).catch((error) => log.error("Failed to remove recent folder", error))
+}
+
+async function renameRecentFolderProject(folderPath: string, projectName: string): Promise<void> {
+  const name = projectName.trim()
+  if (!folderPath || !name) return
+  const next = recentFolders().map((folder) => (folder.path === folderPath ? { ...folder, projectName: name } : folder))
+  try {
+    await patchStateOwner("ui", { recentFolders: next })
+  } catch (error) {
+    log.error("Failed to rename recent folder", error)
+    throw error
+  }
+}
+
+async function saveRemoteServerProfile(input: RemoteServerProfileInput): Promise<RemoteServerProfile> {
+  const profile = buildRemoteServerProfile(input, remoteServers())
+  await patchStateOwner("ui", { remoteServers: buildRemoteServerList(profile, remoteServers()) })
+  return profile
+}
+
+async function markRemoteServerConnected(id: string): Promise<void> {
+  const current = remoteServers().find((entry) => entry.id === id)
+  if (!current) return
+  const now = new Date().toISOString()
+  const updated: RemoteServerProfile = {
+    ...current,
+    updatedAt: now,
+    lastConnectedAt: now,
+  }
+  await patchStateOwner("ui", { remoteServers: buildRemoteServerList(updated, remoteServers()) })
+}
+
+function removeRemoteServerProfile(id: string): void {
+  const next = remoteServers().filter((entry) => entry.id !== id)
+  void patchStateOwner("ui", { remoteServers: next }).catch((error) => log.error("Failed to remove remote server", error))
 }
 
 function recordWorkspaceLaunch(folderPath: string, binaryPath?: string): void {
@@ -556,6 +755,10 @@ function toggleShowTimelineTools(): void {
   updateUiSettings({ showTimelineTools: !preferences().showTimelineTools })
 }
 
+function toggleShowMessageTimeline(): void {
+  updateUiSettings({ showMessageTimeline: !(preferences().showMessageTimeline ?? true) })
+}
+
 function toggleUsageMetrics(): void {
   updateUiSettings({ showUsageMetrics: !preferences().showUsageMetrics })
 }
@@ -602,6 +805,8 @@ void ensureLoaded().catch((error: unknown) => {
 interface ConfigContextValue {
   isLoaded: Accessor<boolean>
   preferences: typeof preferences
+  useTauriNativeEventTransport: typeof useTauriNativeEventTransport
+  setUseTauriNativeEventTransport: typeof setUseTauriNativeEventTransport
   updatePreferences: typeof updatePreferences
   themePreference: typeof themePreference
   setThemePreference: typeof setThemePreference
@@ -612,17 +817,25 @@ interface ConfigContextValue {
   updateEnvironmentVariables: typeof updateEnvironmentVariables
   addEnvironmentVariable: typeof addEnvironmentVariable
   removeEnvironmentVariable: typeof removeEnvironmentVariable
-  updateLastUsedBinary: typeof updateLastUsedBinary
-  updateSpeechSettings: typeof updateSpeechSettings
+  isSecureEnvVar: typeof isSecureEnvVar
+  toggleSecureEnvVar: typeof toggleSecureEnvVar
+    updateLastUsedBinary: typeof updateLastUsedBinary
+    updateLogLevel: typeof updateLogLevel
+    updateSpeechSettings: typeof updateSpeechSettings
 
   // ui-owned state
   recentFolders: typeof recentFolders
   opencodeBinaries: typeof opencodeBinaries
+  remoteServers: typeof remoteServers
   uiState: typeof uiState
   addRecentFolder: typeof addRecentFolder
   removeRecentFolder: typeof removeRecentFolder
+  renameRecentFolderProject: typeof renameRecentFolderProject
   addOpenCodeBinary: typeof addOpenCodeBinary
   removeOpenCodeBinary: typeof removeOpenCodeBinary
+  saveRemoteServerProfile: typeof saveRemoteServerProfile
+  markRemoteServerConnected: typeof markRemoteServerConnected
+  removeRemoteServerProfile: typeof removeRemoteServerProfile
   recordWorkspaceLaunch: typeof recordWorkspaceLaunch
   addRecentModelPreference: typeof addRecentModelPreference
   isFavoriteModelPreference: typeof isFavoriteModelPreference
@@ -633,6 +846,7 @@ interface ConfigContextValue {
   // ui settings helpers
   toggleShowThinkingBlocks: typeof toggleShowThinkingBlocks
   toggleKeyboardShortcutHints: typeof toggleKeyboardShortcutHints
+  toggleShowMessageTimeline: typeof toggleShowMessageTimeline
   toggleShowTimelineTools: typeof toggleShowTimelineTools
   toggleUsageMetrics: typeof toggleUsageMetrics
   toggleAutoCleanupBlankSessions: typeof toggleAutoCleanupBlankSessions
@@ -654,6 +868,8 @@ const ConfigContext = createContext<ConfigContextValue>()
 const configContextValue: ConfigContextValue = {
   isLoaded,
   preferences,
+  useTauriNativeEventTransport,
+  setUseTauriNativeEventTransport,
   updatePreferences,
   themePreference,
   setThemePreference,
@@ -662,15 +878,23 @@ const configContextValue: ConfigContextValue = {
   updateEnvironmentVariables,
   addEnvironmentVariable,
   removeEnvironmentVariable,
+  isSecureEnvVar,
+  toggleSecureEnvVar,
   updateLastUsedBinary,
+  updateLogLevel,
   updateSpeechSettings,
   recentFolders,
   opencodeBinaries,
+  remoteServers,
   uiState,
   addRecentFolder,
   removeRecentFolder,
+  renameRecentFolderProject,
   addOpenCodeBinary,
   removeOpenCodeBinary,
+  saveRemoteServerProfile,
+  markRemoteServerConnected,
+  removeRemoteServerProfile,
   recordWorkspaceLaunch,
   addRecentModelPreference,
   isFavoriteModelPreference,
@@ -679,6 +903,7 @@ const configContextValue: ConfigContextValue = {
   setModelThinkingSelection,
   toggleShowThinkingBlocks,
   toggleKeyboardShortcutHints,
+  toggleShowMessageTimeline,
   toggleShowTimelineTools,
   toggleUsageMetrics,
   toggleAutoCleanupBlankSessions,
@@ -734,6 +959,8 @@ export function useConfig(): ConfigContextValue {
 
 export {
   preferences,
+  useTauriNativeEventTransport,
+  setUseTauriNativeEventTransport,
   uiState,
   serverSettings,
   recentFolders,
@@ -745,10 +972,14 @@ export {
   updateEnvironmentVariables,
   addEnvironmentVariable,
   removeEnvironmentVariable,
+  isSecureEnvVar,
+  toggleSecureEnvVar,
   updateLastUsedBinary,
+  updateLogLevel,
   updateSpeechSettings,
   addRecentFolder,
   removeRecentFolder,
+  renameRecentFolderProject,
   addOpenCodeBinary,
   removeOpenCodeBinary,
   recordWorkspaceLaunch,

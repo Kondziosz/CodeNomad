@@ -1,6 +1,4 @@
 import path from "path"
-import fs from "fs"
-import os from "os"
 import { spawnSync } from "child_process"
 import { connect } from "net"
 import { EventBus } from "../events/bus"
@@ -12,13 +10,17 @@ import { clearWorkspaceSearchCache } from "../filesystem/search-cache"
 import { WorkspaceDescriptor, WorkspaceFileResponse, FileSystemEntry } from "../api-types"
 import { WorkspaceRuntime, ProcessExitInfo } from "./runtime"
 import { Logger } from "../logger"
-import { getOpencodeConfigDir } from "../opencode-config.js"
 import {
+  buildOpencodeConfigContent,
+  getCodeNomadPluginUrl,
+  resolveExistingOpencodeConfigContent,
+} from "../opencode-plugin.js"
+import {
+  OPENCODE_SERVER_BASE_URL_ENV,
   buildOpencodeBasicAuthHeader,
-  DEFAULT_OPENCODE_USERNAME,
-  generateOpencodeServerPassword,
   OPENCODE_SERVER_PASSWORD_ENV,
   OPENCODE_SERVER_USERNAME_ENV,
+  resolveOpencodeServerAuth,
 } from "./opencode-auth"
 
 const STARTUP_STABILITY_DELAY_MS = 1500
@@ -39,12 +41,12 @@ interface WorkspaceRecord extends WorkspaceDescriptor {}
 export class WorkspaceManager {
   private readonly workspaces = new Map<string, WorkspaceRecord>()
   private readonly runtime: WorkspaceRuntime
-  private readonly opencodeConfigDir: string
+  private readonly codeNomadPluginUrl: string
   private readonly opencodeAuth = new Map<string, { username: string; password: string; authorization: string }>()
 
   constructor(private readonly options: WorkspaceManagerOptions) {
     this.runtime = new WorkspaceRuntime(this.options.eventBus, this.options.logger)
-    this.opencodeConfigDir = getOpencodeConfigDir()
+    this.codeNomadPluginUrl = getCodeNomadPluginUrl()
   }
 
   list(): WorkspaceDescriptor[] {
@@ -74,27 +76,42 @@ export class WorkspaceManager {
     return searchWorkspaceFiles(workspace.path, query, options)
   }
 
-  readFile(workspaceId: string, relativePath: string): WorkspaceFileResponse {
+  readFile(workspaceId: string, relativePath: string, options?: { encoding?: "utf-8" | "base64" }): WorkspaceFileResponse {
     const workspace = this.requireWorkspace(workspaceId)
     const browser = new FileSystemBrowser({ rootDir: workspace.path })
-    const contents = browser.readFile(relativePath)
+    const encoding = options?.encoding ?? "utf-8"
+    const contents = encoding === "base64" ? browser.readFileBase64(relativePath) : browser.readFile(relativePath)
     return {
       workspaceId,
       relativePath,
       contents,
+      encoding,
     }
   }
 
-  getGitGraph(workspaceId: string): string {
-    const workspace = this.requireWorkspace(workspaceId)
-    const result = spawnSync("git", ["log", "--graph", "--oneline", "--decorate", "--color=always", "-n", "300"], {
-      cwd: workspace.path,
-      encoding: "utf8",
-    })
-    if (result.error) {
-      throw new Error(`Failed to execute git log: ${result.error.message}`)
+  readFileInDirectory(workspaceId: string, directory: string, relativePath: string, options?: { encoding?: "utf-8" | "base64" }): WorkspaceFileResponse {
+    this.requireWorkspace(workspaceId)
+    const browser = new FileSystemBrowser({ rootDir: directory })
+    const encoding = options?.encoding ?? "utf-8"
+    const contents = encoding === "base64" ? browser.readFileBase64(relativePath) : browser.readFile(relativePath)
+    return {
+      workspaceId,
+      relativePath,
+      contents,
+      encoding,
     }
-    return result.stdout || ""
+  }
+
+  writeFile(workspaceId: string, relativePath: string, contents: string): void {
+    const workspace = this.requireWorkspace(workspaceId)
+    const browser = new FileSystemBrowser({ rootDir: workspace.path })
+    browser.writeFile(relativePath, contents)
+  }
+
+  writeFileInDirectory(workspaceId: string, directory: string, relativePath: string, contents: string): void {
+    this.requireWorkspace(workspaceId)
+    const browser = new FileSystemBrowser({ rootDir: directory })
+    browser.writeFile(relativePath, contents)
   }
 
   async create(folder: string, name?: string): Promise<WorkspaceDescriptor> {
@@ -107,7 +124,7 @@ export class WorkspaceManager {
 
     this.options.logger.info({ workspaceId: id, folder: workspacePath, binary: resolvedBinaryPath }, "Creating workspace")
 
-    const proxyPath = `/workspaces/${id}/worktrees/root/instance`
+    const proxyPath = `/workspaces/${id}/instance`
 
 
     const descriptor: WorkspaceRecord = {
@@ -131,39 +148,44 @@ export class WorkspaceManager {
     const serverConfig = this.options.settings.getOwner("config", "server")
     const envVars = (serverConfig as any)?.environmentVariables
     const userEnvironment = envVars && typeof envVars === "object" && !Array.isArray(envVars) ? (envVars as any) : {}
+    // Resolve any existing OpenCode config: prefer the new inlined content form,
+    // but also accept the legacy OPENCODE_CONFIG_DIR directory form by reading the
+    // well-known config files inside it. Either source is then merged with the
+    // CodeNomad plugin URL so user-defined plugins are preserved.
+    const userConfigDir = userEnvironment.OPENCODE_CONFIG_DIR
+    const existingConfigContent =
+      resolveExistingOpencodeConfigContent(userEnvironment) ??
+      (userConfigDir ? readOpencodeConfigContentFromDir(userConfigDir) : undefined)
+    const opencodeConfigContent = buildOpencodeConfigContent(
+      existingConfigContent,
+      this.codeNomadPluginUrl,
+    )
+    const serverBaseUrl = this.options.getServerBaseUrl()
+    const normalizedServerBaseUrl = serverBaseUrl.replace(/\/+$/, "")
 
-    const opencodeUsername = DEFAULT_OPENCODE_USERNAME
-    const opencodePassword = generateOpencodeServerPassword()
+    const { username: opencodeUsername, password: opencodePassword } = resolveOpencodeServerAuth({
+      userEnvironment,
+      processEnv: process.env,
+    })
     const authorization = buildOpencodeBasicAuthHeader({ username: opencodeUsername, password: opencodePassword })
     if (!authorization) {
       throw new Error("Failed to build OpenCode auth header")
     }
     this.opencodeAuth.set(id, { username: opencodeUsername, password: opencodePassword, authorization })
 
-    let finalOpencodeConfigDir = this.opencodeConfigDir
-    const userConfigDir = userEnvironment.OPENCODE_CONFIG_DIR
-
-    if (userConfigDir && fs.existsSync(userConfigDir)) {
-      try {
-        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codenomad-config-"))
-        fs.cpSync(userConfigDir, tempDir, { recursive: true })
-        fs.cpSync(this.opencodeConfigDir, tempDir, { recursive: true, force: true })
-        finalOpencodeConfigDir = tempDir
-        this.options.logger.info({ workspaceId: id, tempDir }, "Created hybrid config directory")
-      } catch (error) {
-        this.options.logger.error({ workspaceId: id, err: error }, "Failed to create hybrid config directory, falling back to default")
-      }
-    }
-
     const environment = {
       ...userEnvironment,
-      OPENCODE_CONFIG_DIR: finalOpencodeConfigDir,
+      OPENCODE_CONFIG_CONTENT: opencodeConfigContent,
+      OPENCODE_EXPERIMENTAL_WORKSPACES: "true",
       CODENOMAD_INSTANCE_ID: id,
-      CODENOMAD_BASE_URL: this.options.getServerBaseUrl(),
+      CODENOMAD_BASE_URL: serverBaseUrl,
       ...(this.options.nodeExtraCaCertsPath ? { NODE_EXTRA_CA_CERTS: this.options.nodeExtraCaCertsPath } : {}),
+      [OPENCODE_SERVER_BASE_URL_ENV]: `${normalizedServerBaseUrl}${proxyPath}`,
       [OPENCODE_SERVER_USERNAME_ENV]: opencodeUsername,
       [OPENCODE_SERVER_PASSWORD_ENV]: opencodePassword,
     }
+
+    const logLevel = (serverConfig as any)?.logLevel
 
     try {
       const { pid, port, exitPromise, getLastOutput } = await this.runtime.launch({
@@ -171,6 +193,7 @@ export class WorkspaceManager {
         folder: workspacePath,
         binaryPath: resolvedBinaryPath,
         environment,
+        logLevel,
         onExit: (info) => this.handleProcessExit(info.workspaceId, info),
       })
 
