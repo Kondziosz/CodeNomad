@@ -46,6 +46,70 @@ interface ManagedProcess {
   }
 }
 
+/**
+ * Default NO_PROXY baseline merged in whenever any proxy var is set on
+ * the subprocess environment. Kept minimal + future-proof:
+ *   - localhost, 127.0.0.1, ::1   — same-host loopback
+ *   - .ts.net                       — Tailscale MagicDNS suffix (portable;
+ *                                     matches in both Go's stdlib httpproxy
+ *                                     AND Node proxy libraries)
+ *   - 100.64.0.0/10                 — Tailscale CGNAT CIDR (Go supports
+ *                                     CIDR; Node ignores it but the .ts.net
+ *                                     suffix above covers MagicDNS hostnames
+ *                                     for the Node case)
+ */
+const PROXY_SAFE_NO_PROXY_DEFAULT =
+  "localhost,127.0.0.1,::1,.ts.net,100.64.0.0/10"
+
+/**
+ * Guarantee a sane NO_PROXY baseline whenever an HTTP/HTTPS proxy is
+ * present in the environment passed to a subprocess.
+ *
+ * Why this exists: the opencode subprocess is spawned with an env built
+ * from `{ ...process.env, ...serverConfig.environmentVariables }`. When
+ * the host shell has HTTP_PROXY set (common with anonymity proxies such
+ * as Privoxy @ 8118), the subprocess inherits the proxy but typically
+ * inherits a NO_PROXY that only covers loopback + literal IPs — so any
+ * request to a Tailscale MagicDNS hostname (e.g. an MCP server at
+ * servertrucker.tail96e468.ts.net) gets tunneled to the proxy, which
+ * cannot resolve `.ts.net` and stalls. The classic UI symptom is
+ * "SSE error: Non-200 status code (503)" on every locally-hosted MCP,
+ * even though mcp-loki itself is healthy.
+ *
+ * Semantics: MERGE, never replace. We union the inherited NO_PROXY with
+ * the default baseline, dedupe, and apply to BOTH casings (Go reads
+ * NO_PROXY, Node reads no_proxy). User-supplied entries are preserved
+ * and take precedence in dedup. If no proxy var is set, this is a
+ * no-op — we never touch NO_PROXY when there is no proxy to bypass.
+ */
+function ensureSafeProxyEnvironment(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const hasProxy =
+    (typeof env.HTTPS_PROXY === "string" && env.HTTPS_PROXY.length > 0) ||
+    (typeof env.HTTP_PROXY === "string" && env.HTTP_PROXY.length > 0) ||
+    (typeof env.https_proxy === "string" && env.https_proxy.length > 0) ||
+    (typeof env.http_proxy === "string" && env.http_proxy.length > 0)
+  if (!hasProxy) return env
+
+  for (const key of ["NO_PROXY", "no_proxy"] as const) {
+    const merged = new Set<string>()
+    for (const entry of PROXY_SAFE_NO_PROXY_DEFAULT.split(",")) {
+      const trimmed = entry.trim()
+      if (trimmed) merged.add(trimmed)
+    }
+    const existing = env[key]
+    if (typeof existing === "string" && existing.length > 0) {
+      for (const entry of existing.split(",")) {
+        const trimmed = entry.trim()
+        if (trimmed) merged.add(trimmed)
+      }
+    }
+    env[key] = [...merged].join(",")
+  }
+  return env
+}
+
 export class WorkspaceRuntime {
   private processes = new Map<string, ManagedProcess>()
 
@@ -56,7 +120,10 @@ export class WorkspaceRuntime {
 
     const logLevel = typeof options.logLevel === "string" ? options.logLevel.toUpperCase() : "DEBUG"
     const args = ["serve", "--port", "0", "--print-logs", "--log-level", logLevel]
-    const env = { ...process.env, ...(options.environment ?? {}) }
+    const env = ensureSafeProxyEnvironment({
+      ...process.env,
+      ...(options.environment ?? {}),
+    })
 
     let exitResolve: ((info: ProcessExitInfo) => void) | null = null
     const exitPromise = new Promise<ProcessExitInfo>((resolveExit) => {
