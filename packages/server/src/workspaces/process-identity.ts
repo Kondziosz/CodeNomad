@@ -37,20 +37,23 @@ export const LAUNCH_CLEANUP_TOKEN_ENV = "CODENOMAD_LAUNCH_CLEANUP_TOKEN"
 
 type SpawnCommand = typeof spawnSync
 
-const LINUX_IDENTITY_FUNCTIONS = String.raw`
+const LINUX_IDENTITY_FUNCTIONS = `
 boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || exit 20
 read_stat() {
   line=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-  stat_pid=$(printf '%s\n' "$line" | cut -d' ' -f1); rest=$(printf '%s\n' "$line" | sed 's/^.*) //'); set -- $rest
-  stat_ppid=$2; stat_group=$3; stat_start=$20
+  stat_pid=$(printf '%s\\n' "$line" | cut -d' ' -f1); rest=$(printf '%s\\n' "$line" | sed 's/^.*) //'); set -- $rest
+  stat_ppid=$2; stat_group=$3; stat_start=\${20}
 }
-emit_linux() { printf '%s|%s|%s|%s|%s|%s|%s\n' "$1" "$stat_pid" "$stat_ppid" "$stat_group" "$stat_start" "$boot" "$stat_start"; }
+emit_linux() { printf '%s|%s|%s|%s|%s|%s|%s\\n' "$1" "$stat_pid" "$stat_ppid" "$stat_group" "$stat_start" "$boot" "$stat_start"; }
 `
 
-const LINUX_SNAPSHOT_SCRIPT = String.raw`${LINUX_IDENTITY_FUNCTIONS}
-for stat in /proc/[0-9]*/stat; do
-  pid=$(basename "$(dirname "$stat")"); read_stat "$pid" && emit_linux "" | cut -c2-
-done
+// Single-pass awk over /proc/[0-9]*/stat. The previous loop forked cat/
+// printf/cut/sed/printf per PID, which on a busy host with ~400+ PIDs
+// easily exceeded the 1s probe timeout and surfaced as
+// "process identity capture failed: spawnSync sh ETIMEDOUT" on every
+// workspace launch. awk does it in one process, in ~15ms on this host.
+const LINUX_SNAPSHOT_SCRIPT = `${LINUX_IDENTITY_FUNCTIONS}
+awk -v boot="$boot" 'BEGIN { OFS="|" } { pid = $1; cp = index($0, ") "); if (cp == 0) next; rest = substr($0, cp + 2); n = split(rest, a, " "); if (n < 20) next; printf "%s|%s|%s|%s|%s|%s\\n", pid, a[2], a[3], a[20], boot, a[20] }' /proc/[0-9]*/stat
 exit 0
 `
 
