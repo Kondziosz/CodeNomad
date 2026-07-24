@@ -18,6 +18,9 @@ import { initGithubStars } from "./stores/github-stars"
 
 import { useCommands } from "./lib/hooks/use-commands"
 import { useAppLifecycle } from "./lib/hooks/use-app-lifecycle"
+import { useAppSessionRestore } from "./lib/hooks/use-app-session-restore"
+import { loadedRestorableSession } from "./stores/client-state"
+import { shouldShowAppHomeOverlay, shouldShowEmptyAppHome } from "./stores/app-session-restore-gate"
 import { getLogger } from "./lib/logger"
 import { launchError, showLaunchError, clearLaunchError } from "./stores/launch-errors"
 import { formatLaunchErrorMessage, isMissingBinaryMessage } from "./lib/launch-errors"
@@ -31,10 +34,9 @@ import {
   showFolderSelection,
   setShowFolderSelection,
 } from "./stores/ui"
-import { useConfig } from "./stores/preferences"
+import { recentFolders, useConfig } from "./stores/preferences"
 import {
   createInstance,
-  getExistingInstanceForFolder,
   instances,
   stopInstance,
   disconnectedInstance,
@@ -42,12 +44,12 @@ import {
 } from "./stores/instances"
 import {
   getSessions,
+  getSessionRoot,
   activeSessionId,
   setActiveParentSession,
   clearActiveParentSession,
   createSession,
   fetchSessions,
-  getSessionFetchLimit,
   updateSessionAgent,
   updateSessionModel,
 } from "./stores/sessions"
@@ -66,15 +68,16 @@ import {
   ensureActiveAppTab,
   getAdjacentAppTabId,
   getAppTabById,
+  markAppTabUserInteraction,
   moveAppTab,
   selectAppTab,
   selectInstanceTab,
   selectSidecarTab,
 } from "./stores/app-tabs"
-
 const log = getLogger("actions")
 
 const App: Component = () => {
+  useAppSessionRestore()
   const { t } = useI18n()
   const {
     preferences,
@@ -100,11 +103,6 @@ const App: Component = () => {
   const [escapeInDebounce, setEscapeInDebounce] = createSignal(false)
   const [instanceTabBarHeight, setInstanceTabBarHeight] = createSignal(0)
   const [sidecarPickerOpen, setSidecarPickerOpen] = createSignal(false)
-  const [alreadyOpenFolderChoice, setAlreadyOpenFolderChoice] = createSignal<{
-    folderPath: string
-    binaryPath: string
-    instanceId: string
-  } | null>(null)
   const phoneQuery = useMediaQuery("(max-width: 767px)")
   const isPhoneLayout = createMemo(() => phoneQuery())
 
@@ -281,28 +279,28 @@ const App: Component = () => {
     if (!folderPath) {
       return
     }
+
     const selectedBinary = binaryPath || serverSettings().opencodeBinary || "opencode"
     const projectName = getProjectNameForFolder(folderPath)
-    recordWorkspaceLaunch(folderPath, selectedBinary)
     clearLaunchError()
-
-    if (!options?.forceNew) {
-      const existingInstance = getExistingInstanceForFolder(folderPath)
-      if (existingInstance) {
-        setAlreadyOpenFolderChoice({ folderPath, binaryPath: selectedBinary, instanceId: existingInstance.id })
-        return
-      }
-    }
 
     setIsSelectingFolder(true)
     try {
-      const instanceId = await createInstance(folderPath, selectedBinary, projectName)
-      selectInstanceTab(instanceId)
+      const result = await createInstance(folderPath, selectedBinary, projectName, { forceNew: options?.forceNew })
+      recordWorkspaceLaunch(instances().get(result.instanceId)?.folder ?? folderPath, selectedBinary, folderPath)
+      if (result.reused) {
+        selectInstanceTab(result.instanceId)
+        setShowFolderSelection(false)
+        log.info("Selected reused instance", { instanceId: result.instanceId, folderPath })
+        return
+      }
+
+      selectInstanceTab(result.instanceId)
       setShowFolderSelection(false)
 
       log.info("Created instance", {
-        instanceId,
-        port: instances().get(instanceId)?.port,
+        instanceId: result.instanceId,
+        port: instances().get(result.instanceId)?.port,
       })
     } catch (error) {
       const message = formatLaunchErrorMessage(error, t("app.launchError.fallbackMessage"))
@@ -314,24 +312,13 @@ const App: Component = () => {
     }
   }
 
-  function dismissAlreadyOpenFolderChoice() {
-    setAlreadyOpenFolderChoice(null)
-  }
-
-  function switchToAlreadyOpenFolder() {
-    const choice = alreadyOpenFolderChoice()
-    if (!choice) return
-    setAlreadyOpenFolderChoice(null)
-    selectInstanceTab(choice.instanceId)
+  function handleSelectExistingInstance(instanceId: string, recentPath: string, binaryPath: string) {
+    const instance = instances().get(instanceId)
+    if (!instance) return
+    recordWorkspaceLaunch(instance.folder, binaryPath, recentPath)
+    selectInstanceTab(instanceId)
     setShowFolderSelection(false)
-    log.info("Selected existing instance", { instanceId: choice.instanceId, folderPath: choice.folderPath })
-  }
-
-  function openAnotherFolderInstance() {
-    const choice = alreadyOpenFolderChoice()
-    if (!choice) return
-    setAlreadyOpenFolderChoice(null)
-    void handleSelectFolder(choice.folderPath, choice.binaryPath, { forceNew: true })
+    log.info("Selected existing instance", { instanceId, folderPath: instance.folder })
   }
 
   function handleLaunchErrorClose() {
@@ -389,7 +376,7 @@ const App: Component = () => {
 
     if (!confirmed) return
 
-    await stopInstance(instanceId)
+    stopInstance(instanceId)
   }
 
   async function handleNewSession(instanceId: string) {
@@ -409,17 +396,13 @@ const App: Component = () => {
       return
     }
 
-    const parentSessionId = session.parentId ?? session.id
-    const parentSession = sessions.find((s) => s.id === parentSessionId)
-
-    if (!parentSession || parentSession.parentId !== null) {
-      return
-    }
+    const parentSession = getSessionRoot(instanceId, sessionId)
+    if (!parentSession) return
 
     clearActiveParentSession(instanceId)
 
     try {
-      await fetchSessions(instanceId, { reset: true, limit: getSessionFetchLimit(instanceId) })
+      await fetchSessions(instanceId, { reset: true })
     } catch (error) {
       log.error("Failed to refresh sessions after closing", error)
     }
@@ -428,6 +411,7 @@ const App: Component = () => {
   async function handleCloseAppTab(tabId: string) {
     const tab = getAppTabById(tabId)
     if (!tab) return
+    markAppTabUserInteraction()
 
     const fallbackTabId = activeAppTabId() === tabId ? getAdjacentAppTabId(tabId) : activeAppTabId()
 
@@ -501,7 +485,7 @@ const App: Component = () => {
       const tauriBridge = (window as { __TAURI__?: { event?: { listen: (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void> } } }).__TAURI__
       if (tauriBridge?.event) {
         let unlistenMenu: (() => void) | null = null
-        
+
         tauriBridge.event.listen("menu:newInstance", () => {
           handleNewInstanceRequest()
         }).then((unlisten) => {
@@ -543,7 +527,7 @@ const App: Component = () => {
                    <p class="text-xs font-medium text-muted uppercase tracking-wide mb-1">{t("app.launchError.binaryPathLabel")}</p>
                    <p class="text-sm font-mono text-primary break-all">{launchErrorPath()}</p>
                  </div>
- 
+
                  <Show when={launchErrorMessage()}>
                    <div class="rounded-lg border border-base bg-surface-secondary p-4 flex flex-col gap-2 flex-1 min-h-0">
                      <p class="text-xs font-medium text-muted uppercase tracking-wide">{t("app.launchError.errorOutputLabel")}</p>
@@ -646,18 +630,22 @@ const App: Component = () => {
             </>
           }
         >
-          <FolderSelectionView
-            onSelectFolder={handleSelectFolder}
-            isLoading={isSelectingFolder()}
-            onOpenSidecar={handleOpenSidecarPicker}
-          />
+          <Show when={shouldShowEmptyAppHome(loadedRestorableSession())}>
+            <FolderSelectionView
+              onSelectFolder={handleSelectFolder}
+              onSelectExistingInstance={handleSelectExistingInstance}
+              isLoading={isSelectingFolder()}
+              onOpenSidecar={handleOpenSidecarPicker}
+            />
+          </Show>
         </Show>
 
-        <Show when={showFolderSelection()}>
+        <Show when={shouldShowAppHomeOverlay(showFolderSelection(), appTabs().length)}>
           <div class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
             <div class="w-full h-full relative">
               <FolderSelectionView
                 onSelectFolder={handleSelectFolder}
+                onSelectExistingInstance={handleSelectExistingInstance}
                 isLoading={isSelectingFolder()}
                 onOpenSidecar={handleOpenSidecarPicker}
                 onClose={() => {
@@ -668,34 +656,9 @@ const App: Component = () => {
             </div>
           </div>
         </Show>
- 
+
         <SettingsScreen />
         <SideCarPickerDialog open={sidecarPickerOpen()} onClose={() => setSidecarPickerOpen(false)} onOpenSidecar={handleOpenSidecar} />
-        <Show when={alreadyOpenFolderChoice()}>
-          <Dialog open modal onOpenChange={(open) => !open && dismissAlreadyOpenFolderChoice()}>
-            <Dialog.Portal>
-              <Dialog.Overlay class="modal-overlay z-[60]" />
-              <Dialog.Content class="modal-surface fixed left-1/2 top-1/2 z-[1310] w-full max-w-sm -translate-x-1/2 -translate-y-1/2 p-6 border border-base shadow-2xl" tabIndex={-1}>
-                <Dialog.Title class="text-lg font-semibold text-primary">
-                  {t("folderSelection.recent.alreadyOpenTitle")}
-                </Dialog.Title>
-                <Dialog.Description class="text-sm text-secondary mt-1">
-                  {t("folderSelection.recent.alreadyOpenMessage")}
-                </Dialog.Description>
-
-                <div class="mt-6 flex justify-end gap-3">
-                  <button type="button" class="button-secondary" onClick={openAnotherFolderInstance}>
-                    {t("folderSelection.recent.openAnotherInstance")}
-                  </button>
-                  <button type="button" class="button-primary" onClick={switchToAlreadyOpenFolder}>
-                    {t("folderSelection.recent.switchToOpenProject")}
-                  </button>
-                </div>
-              </Dialog.Content>
-            </Dialog.Portal>
-          </Dialog>
-        </Show>
- 
         <AlertDialog />
 
         <Toaster

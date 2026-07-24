@@ -8,7 +8,7 @@ export const instanceMessages = {
   "instanceInfo.labels.folder": "Ordner",
   "instanceInfo.labels.project": "Projekt",
   "instanceInfo.labels.versionControl": "Versionskontrolle",
-  "instanceInfo.labels.opencodeVersion": "OpenCode Version",
+  "instanceInfo.labels.opencodeVersion": "OpenCode-Version",
   "instanceInfo.labels.binaryPath": "Binärpfad",
   "instanceInfo.labels.environmentVariables": "Umgebungsvariablen ({count})",
   "instanceInfo.loading": "Wird geladen...",
@@ -130,8 +130,8 @@ export const instanceMessages = {
   "instanceShell.gitChanges.actions.stage": "Datei stagen",
   "instanceShell.gitChanges.actions.unstage": "Datei unstagen",
   "instanceShell.gitChanges.commit.placeholder": "Commit-Nachricht eingeben",
-  "instanceShell.gitChanges.commit.submit": "Commit",
-  "instanceShell.gitChanges.commit.submitting": "Committing...",
+  "instanceShell.gitChanges.commit.submit": "Commit erstellen",
+  "instanceShell.gitChanges.commit.submitting": "Commit wird erstellt...",
   "instanceShell.gitChanges.commit.success": "Commit erfolgreich erstellt",
   "instanceShell.gitChanges.commit.error": "Commit konnte nicht erstellt werden",
 
@@ -191,8 +191,8 @@ export const instanceMessages = {
 
   "instanceShell.yoloMode.noSessionSelected": "Wählen Sie eine Sitzung aus, um den Yolo-Modus zu konfigurieren.",
   "instanceShell.yoloMode.title": "Yolo-Modus",
-  "instanceShell.yoloMode.description": "Berechtigungsanfragen für diese Sitzung automatisch genehmigen. Standardmäßig deaktiviert.",
-  "instanceShell.yoloMode.badge": "Yolo-Modus",
+  "instanceShell.yoloMode.description": "Berechtigungsanfragen für diese Sitzung automatisch genehmigen.",
+  "instanceShell.yoloMode.badge": "Yolo",
   "instanceShell.yoloMode.badgeAriaLabel": "Yolo-Modus aktiviert",
 
   "instanceShell.backgroundProcesses.empty": "Keine Hintergrundprozesse.",

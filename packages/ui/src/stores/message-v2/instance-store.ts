@@ -13,6 +13,7 @@ import {
 import type { ClientPart, MessageInfo } from "../../types/message"
 import { mergePermissionRequest } from "../../types/permission"
 import { clearRecordDisplayCacheForMessages } from "./record-display-cache"
+import { mergePendingRequestEntry, shouldSkipPendingRequestUpsert } from "./pending-request-dedupe"
 import type {
   InstanceMessageState,
   LatestTodoSnapshot,
@@ -34,6 +35,7 @@ const storeLog = getLogger("session")
 
 interface MessageStoreHooks {
   onSessionCleared?: (instanceId: string, sessionId: string) => void
+  onScrollSnapshotChanged?: (instanceId: string, sessionId: string, scope: string, snapshot: ScrollSnapshot) => void
 }
 
 function createInitialState(instanceId: string): InstanceMessageState {
@@ -224,8 +226,8 @@ export interface InstanceMessageStore {
     bumpRevision?: boolean
     bumpSessionRevision: boolean
   }) => void
-  removeMessage: (messageId: string) => void
-  removeMessagePart: (messageId: string, partId: string) => void
+  removeMessage: (messageId: string, fallbackSessionId?: string) => void
+  removeMessagePart: (messageId: string, partId: string, fallbackSessionId?: string) => void
   bufferPendingPart: (entry: PendingPartEntry) => void
   flushPendingParts: (messageId: string) => void
   replaceMessageId: (options: ReplaceMessageIdOptions) => void
@@ -242,6 +244,7 @@ export interface InstanceMessageStore {
   rebuildUsage: (sessionId: string, infos: Iterable<MessageInfo>) => void
   getSessionUsage: (sessionId: string) => SessionUsageState | undefined
   setScrollSnapshot: (sessionId: string, scope: string, snapshot: Omit<ScrollSnapshot, "updatedAt">) => void
+  restoreScrollSnapshot: (sessionId: string, scope: string, snapshot: ScrollSnapshot) => void
   getScrollSnapshot: (sessionId: string, scope: string) => ScrollSnapshot | undefined
   getSessionRevision: (sessionId: string) => number
   getSessionMessageIds: (sessionId: string) => string[]
@@ -251,7 +254,8 @@ export interface InstanceMessageStore {
   getLastCompactionMessageIndex: (sessionId: string) => number
   getMessage: (messageId: string) => MessageRecord | undefined
   getLatestTodoSnapshot: (sessionId: string) => LatestTodoSnapshot | undefined
-  clearSession: (sessionId: string) => void
+  clearSession: (sessionId: string, options?: { preserveScroll?: boolean; notify?: boolean }) => void
+  clearScrollSnapshots: () => void
   clearInstance: () => void
 }
 
@@ -728,7 +732,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     }
   }
 
-  function removeMessage(messageId: string) {
+  function removeMessage(messageId: string, fallbackSessionId?: string) {
     if (!messageId) return
 
     const record = state.messages[messageId]
@@ -747,6 +751,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
         }
       })
     }
+    if (!sessionIds.size && fallbackSessionId) sessionIds.add(fallbackSessionId)
 
     clearRecordDisplayCacheForMessages(instanceId, [messageId])
 
@@ -796,10 +801,13 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     })
   }
 
-  function removeMessagePart(messageId: string, partId: string) {
+  function removeMessagePart(messageId: string, partId: string, fallbackSessionId?: string) {
     if (!messageId || !partId) return
     const message = state.messages[messageId]
-    if (!message) return
+    if (!message) {
+      if (fallbackSessionId) bumpSessionRevision(fallbackSessionId)
+      return
+    }
 
     clearRecordDisplayCacheForMessages(instanceId, [messageId])
 
@@ -958,6 +966,23 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     const entry = mergePermissionEntry(input)
     const messageKey = entry.messageId ?? "__global__"
     const partKey = entry.partId ?? entry.permission?.id ?? "__global__"
+    const existing = state.permissions.queue.find((item) => item.permission.id === entry.permission.id)
+    const existingAtLocation = state.permissions.byMessage[messageKey]?.[partKey]
+    const expectedActiveId = state.permissions.queue[0]?.permission.id
+    if (shouldSkipPendingRequestUpsert({
+      existing,
+      existingAtLocationId: existingAtLocation?.permission.id,
+      expectedActiveId,
+      activeId: state.permissions.active?.permission.id,
+      incomingId: entry.permission.id,
+      incomingMessageId: entry.messageId,
+      incomingPartId: entry.partId,
+      incomingEnqueuedAt: entry.enqueuedAt,
+      existingValue: existing?.permission,
+      incomingValue: entry.permission,
+    })) {
+      return
+    }
 
     setState(
       "permissions",
@@ -1019,13 +1044,47 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     return { entry, active }
   }
 
-  function upsertQuestion(entry: QuestionEntry) {
+  function mergeQuestionEntry(entry: QuestionEntry): QuestionEntry {
+    const existing = state.questions.queue.find((item) => item.request.id === entry.request.id)
+    return mergePendingRequestEntry(entry, existing)
+  }
+
+  function upsertQuestion(input: QuestionEntry) {
+    const entry = mergeQuestionEntry(input)
     const messageKey = entry.messageId ?? "__global__"
     const partKey = entry.partId ?? entry.request?.id ?? "__global__"
+    const existing = state.questions.queue.find((item) => item.request.id === entry.request.id)
+    const existingAtLocation = state.questions.byMessage[messageKey]?.[partKey]
+    const expectedActiveId = state.questions.queue[0]?.request.id
+    if (shouldSkipPendingRequestUpsert({
+      existing,
+      existingAtLocationId: existingAtLocation?.request.id,
+      expectedActiveId,
+      activeId: state.questions.active?.request.id,
+      incomingId: entry.request.id,
+      incomingMessageId: entry.messageId,
+      incomingPartId: entry.partId,
+      incomingEnqueuedAt: entry.enqueuedAt,
+      existingValue: existing?.request,
+      incomingValue: entry.request,
+    })) {
+      return
+    }
 
     setState(
       "questions",
       produce((draft) => {
+        Object.keys(draft.byMessage).forEach((existingMessageKey) => {
+          const partEntries = draft.byMessage[existingMessageKey]
+          Object.keys(partEntries).forEach((existingPartKey) => {
+            if (partEntries[existingPartKey].request.id === entry.request.id) {
+              delete partEntries[existingPartKey]
+            }
+          })
+          if (Object.keys(partEntries).length === 0) {
+            delete draft.byMessage[existingMessageKey]
+          }
+        })
         draft.byMessage[messageKey] = draft.byMessage[messageKey] ?? {}
         draft.byMessage[messageKey][partKey] = entry
         const existingIndex = draft.queue.findIndex((item) => item.request.id === entry.request.id)
@@ -1151,7 +1210,14 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
 
   function setScrollSnapshot(sessionId: string, scope: string, snapshot: Omit<ScrollSnapshot, "updatedAt">) {
     const key = makeScrollKey(sessionId, scope)
-    setState("scrollState", key, { ...snapshot, updatedAt: Date.now() })
+    const next = { ...snapshot, updatedAt: Date.now() }
+    setState("scrollState", key, next)
+    hooks?.onScrollSnapshotChanged?.(instanceId, sessionId, scope, next)
+  }
+
+  function restoreScrollSnapshot(sessionId: string, scope: string, snapshot: ScrollSnapshot) {
+    const key = makeScrollKey(sessionId, scope)
+    setState("scrollState", key, snapshot)
   }
 
   function getScrollSnapshot(sessionId: string, scope: string) {
@@ -1159,7 +1225,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     return state.scrollState[key]
   }
 
-  function clearSession(sessionId: string) {
+  function clearSession(sessionId: string, options?: { preserveScroll?: boolean; notify?: boolean }) {
     if (!sessionId) return
 
     clearPromptDisplayOverridesForSession(instanceId, sessionId)
@@ -1228,16 +1294,18 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
         return next
       })
 
-      setState("scrollState", (prev) => {
-        const next = { ...prev }
-        const prefix = `${sessionId}:`
-        Object.keys(next).forEach((key) => {
-          if (key.startsWith(prefix)) {
-            delete next[key]
-          }
+      if (!options?.preserveScroll) {
+        setState("scrollState", (prev) => {
+          const next = { ...prev }
+          const prefix = `${sessionId}:`
+          Object.keys(next).forEach((key) => {
+            if (key.startsWith(prefix)) {
+              delete next[key]
+            }
+          })
+          return next
         })
-        return next
-      })
+      }
 
       setState("sessions", sessionId, (current) => {
         if (!current) return current
@@ -1255,7 +1323,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
 
     clearLatestTodoSnapshot(sessionId)
  
-    hooks?.onSessionCleared?.(instanceId, sessionId)
+    if (options?.notify !== false) hooks?.onSessionCleared?.(instanceId, sessionId)
   }
 
  
@@ -1263,6 +1331,10 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
      clearPromptDisplayOverridesForInstance(instanceId, Object.keys(state.sessions))
      messageInfoCache.clear()
       setState(reconcile(createInitialState(instanceId)))
+    }
+
+    function clearScrollSnapshots() {
+      setState("scrollState", reconcile({}))
     }
  
     return {
@@ -1294,6 +1366,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
       rebuildUsage,
       getSessionUsage,
       setScrollSnapshot,
+      restoreScrollSnapshot,
       getScrollSnapshot,
       getSessionRevision: getSessionRevisionValue,
       getSessionMessageIds: (sessionId: string) => state.sessions[sessionId]?.messageIds ?? [],
@@ -1302,6 +1375,7 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
       getMessage: (messageId: string) => state.messages[messageId],
       getLatestTodoSnapshot: (sessionId: string) => state.latestTodos[sessionId],
       clearSession,
+      clearScrollSnapshots,
       clearInstance,
      }
    }

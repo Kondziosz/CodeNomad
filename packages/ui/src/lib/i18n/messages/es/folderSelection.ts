@@ -2,7 +2,7 @@ export const folderSelectionMessages = {
   "folderSelection.language.ariaLabel": "Idioma",
 
   "folderSelection.logoAlt": "Logo de CodeNomad",
-  "folderSelection.tagline": "Selecciona una carpeta para empezar a programar con AI",
+  "folderSelection.tagline": "Selecciona una carpeta para empezar a programar con IA",
 
   "folderSelection.links.github": "GitHub de CodeNomad",
   "folderSelection.links.githubStars": "Estrellas de GitHub de CodeNomad",
@@ -17,10 +17,8 @@ export const folderSelectionMessages = {
   "folderSelection.recent.rename": "Renombrar workspace",
   "folderSelection.recent.remove": "Eliminar de recientes",
   "folderSelection.recent.openBadge": "Abierta",
-  "folderSelection.recent.alreadyOpenTitle": "Proyecto ya abierto",
-  "folderSelection.recent.alreadyOpenMessage": "Elige cómo abrir esta carpeta.",
+  "folderSelection.recent.openNewInstance": "Abrir una nueva instancia",
   "folderSelection.recent.switchToOpenProject": "Cambiar al proyecto abierto",
-  "folderSelection.recent.openAnotherInstance": "Abrir otra instancia",
 
   "folderSelection.browse.title": "Buscar carpeta",
   "folderSelection.browse.subtitle": "Selecciona cualquier carpeta en tu ordenador",
@@ -91,11 +89,11 @@ export const folderSelectionMessages = {
   "folderSelection.servers.dialog.errorRequired": "El nombre y la URL del servidor son obligatorios.",
   "folderSelection.servers.dialog.errorConnect": "No se pudo conectar al servidor remoto.",
   "folderSelection.servers.certificateInstall.title": "Instalar certificado local",
-  "folderSelection.servers.certificateInstall.confirmMessage": "CodeNomad necesita instalar un certificado local para abrir ventanas remotas HTTPS autofirmadas. Este certificado solo se usa para el trafico del proxy local de escritorio en tu equipo. Es posible que tu sistema operativo muestre un segundo aviso de certificado despues de esto.",
+  "folderSelection.servers.certificateInstall.confirmMessage": "CodeNomad necesita instalar un certificado local para abrir ventanas remotas HTTPS autofirmadas. Este certificado solo se usa para el tráfico del proxy local de escritorio en tu equipo. Es posible que tu sistema operativo muestre un segundo aviso de certificado después de esto.",
   "folderSelection.servers.certificateInstall.confirmLabel": "Continuar",
   "folderSelection.servers.certificateInstall.cancelLabel": "Cancelar",
   "folderSelection.servers.certificateInstall.cancelled": "CodeNomad necesita que el certificado local sea de confianza antes de poder abrir ventanas remotas HTTPS autofirmadas.",
-  "folderSelection.sidecars.button": "Open SideCar",
+  "folderSelection.sidecars.button": "Abrir SideCar",
 
   "projectRenameDialog.title": "Renombrar workspace",
   "projectRenameDialog.description.withLabel": "Actualiza el nombre del workspace para \"{label}\".",

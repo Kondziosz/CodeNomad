@@ -17,10 +17,8 @@ export const folderSelectionMessages = {
   "folderSelection.recent.rename": "שנה שם סביבת עבודה",
   "folderSelection.recent.remove": "הסר מהרשימה האחרונה",
   "folderSelection.recent.openBadge": "פתוח",
-  "folderSelection.recent.alreadyOpenTitle": "הפרויקט כבר פתוח",
-  "folderSelection.recent.alreadyOpenMessage": "בחר כיצד לפתוח את התיקייה הזו.",
+  "folderSelection.recent.openNewInstance": "פתיחת מופע חדש",
   "folderSelection.recent.switchToOpenProject": "עבור לפרויקט הפתוח",
-  "folderSelection.recent.openAnotherInstance": "פתח מופע נוסף",
 
   "folderSelection.browse.title": "עיון בתיקייה",
   "folderSelection.browse.subtitle": "בחר כל תיקייה במחשב שלך",
@@ -95,7 +93,7 @@ export const folderSelectionMessages = {
   "folderSelection.servers.certificateInstall.confirmLabel": "המשך",
   "folderSelection.servers.certificateInstall.cancelLabel": "ביטול",
   "folderSelection.servers.certificateInstall.cancelled": "CodeNomad צריך שהאישור המקומי יהיה מהימן לפני שיוכל לפתוח חלונות HTTPS מרוחקים עם אישור בחתימה עצמית.",
-  "folderSelection.sidecars.button": "Open SideCar",
+  "folderSelection.sidecars.button": "פתח SideCar",
 
   "projectRenameDialog.title": "שנה שם סביבת עבודה",
   "projectRenameDialog.description.withLabel": "עדכן את שם סביבת העבודה עבור \"{label}\".",

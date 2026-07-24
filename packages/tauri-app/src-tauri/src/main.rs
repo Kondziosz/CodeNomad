@@ -3,21 +3,27 @@
 #[allow(dead_code)]
 mod cert_manager;
 mod cli_manager;
+mod client_state;
 mod desktop_event_transport;
 #[cfg(target_os = "linux")]
 mod linux_tls;
 mod managed_node;
+mod shutdown;
+mod windows_update;
 
 use cli_manager::{CliProcessManager, CliStatus};
-use desktop_event_transport::{DesktopEventTransportManager, DesktopEventsStartRequest, DesktopEventsStartResult};
+use desktop_event_transport::{
+    DesktopEventTransportManager, DesktopEventsStartRequest, DesktopEventsStartResult,
+};
 use keepawake::KeepAwake;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(windows, test))]
+use std::future::Future;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+use tauri::menu::{AboutMetadata, MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::webview::{PageLoadEvent, Webview};
 use tauri::{
@@ -38,11 +44,8 @@ use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
-static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-const DEFAULT_ZOOM_LEVEL: f64 = 1.0;
 const ZOOM_STEP: f64 = 0.1;
-const MIN_ZOOM_LEVEL: f64 = 0.2;
-const MAX_ZOOM_LEVEL: f64 = 5.0;
+const RELEASES_URL: &str = "https://github.com/NeuralNomadsAI/CodeNomad/releases/latest";
 const LOCAL_WINDOW_CONTEXT_SCRIPT: &str = "window.__CODENOMAD_WINDOW_CONTEXT__ = 'local';";
 const REMOTE_WINDOW_CONTEXT_SCRIPT: &str = "window.__CODENOMAD_WINDOW_CONTEXT__ = 'remote';";
 
@@ -53,7 +56,6 @@ pub struct AppState {
     pub manager: CliProcessManager,
     pub desktop_events: DesktopEventTransportManager,
     pub wake_lock: Mutex<Option<KeepAwake>>,
-    pub zoom_level: Mutex<f64>,
     pub remote_origins: Mutex<HashMap<String, String>>,
     pub remote_proxy_sessions: Mutex<HashMap<String, String>>,
     pub remote_skip_tls_verify: Mutex<HashMap<String, bool>>,
@@ -350,6 +352,9 @@ async fn open_remote_window_impl(
     .build()
     .map_err(|err| err.to_string())?;
 
+    #[cfg(windows)]
+    shutdown::schedule_windows_session_end_handler(&window)?;
+
     #[cfg(target_os = "linux")]
     {
         linux_tls::ensure_remote_window_tls_handler(&window, &app, &label)?;
@@ -462,59 +467,65 @@ fn emit_folder_drop_event(
     }
 }
 
-fn clamp_zoom_level(value: f64) -> f64 {
-    value.clamp(MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL)
-}
-
-fn set_main_window_zoom(app_handle: &AppHandle, next_zoom: f64) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let normalized = clamp_zoom_level(next_zoom);
-        if window.set_zoom(normalized).is_ok() {
-            if let Ok(mut zoom_level) = app_handle.state::<AppState>().zoom_level.lock() {
-                *zoom_level = normalized;
-            }
-        }
-    }
-}
-
 fn reload_main_window(app_handle: &AppHandle) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.reload();
-    }
+    client_state::before_main_window_navigation(
+        app_handle,
+        client_state::NavigationKind::Reload,
+        None,
+        |app| {
+            let window = app
+                .get_webview_window("main")
+                .ok_or_else(|| "main window not found for reload".to_string())?;
+            window
+                .reload()
+                .map_err(|err| format!("failed to reload main window: {err}"))
+        },
+    );
 }
 
 fn force_reload_main_window(app_handle: &AppHandle) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        if let Ok(mut url) = window.url() {
-            if should_allow_internal(&url) {
-                let reload_token = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    .to_string();
+    client_state::before_main_window_navigation(
+        app_handle,
+        client_state::NavigationKind::ForceReload,
+        None,
+        |app| {
+            let window = app
+                .get_webview_window("main")
+                .ok_or_else(|| "main window not found for force reload".to_string())?;
+            if let Ok(mut url) = window.url() {
+                if should_allow_internal(&url) {
+                    let reload_token = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        .to_string();
 
-                let existing_pairs: Vec<(String, String)> = url
-                    .query_pairs()
-                    .into_owned()
-                    .filter(|(key, _)| key != "__codenomad_force_reload")
-                    .collect();
+                    let existing_pairs: Vec<(String, String)> = url
+                        .query_pairs()
+                        .into_owned()
+                        .filter(|(key, _)| key != "__codenomad_force_reload")
+                        .collect();
 
-                {
-                    let mut pairs = url.query_pairs_mut();
-                    pairs.clear();
-                    for (key, value) in existing_pairs {
-                        pairs.append_pair(&key, &value);
+                    {
+                        let mut pairs = url.query_pairs_mut();
+                        pairs.clear();
+                        for (key, value) in existing_pairs {
+                            pairs.append_pair(&key, &value);
+                        }
+                        pairs.append_pair("__codenomad_force_reload", &reload_token);
                     }
-                    pairs.append_pair("__codenomad_force_reload", &reload_token);
+
+                    return window
+                        .navigate(url)
+                        .map_err(|err| format!("failed to force reload main window: {err}"));
                 }
-
-                let _ = window.navigate(url);
-                return;
             }
-        }
 
-        let _ = window.reload();
-    }
+            window
+                .reload()
+                .map_err(|err| format!("failed to force reload main window: {err}"))
+        },
+    );
 }
 
 fn toggle_fullscreen_window(app_handle: &AppHandle) {
@@ -556,6 +567,11 @@ fn set_windows_app_user_model_id() {
 fn set_windows_app_user_model_id() {}
 
 fn main() {
+    #[cfg(windows)]
+    if let Some(code) = cli_manager::run_windows_cli_launcher_if_requested() {
+        std::process::exit(code);
+    }
+
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let navigation_guard: TauriPlugin<Wry, ()> = PluginBuilder::new("external-link-guard")
@@ -584,7 +600,6 @@ fn main() {
             manager: CliProcessManager::new(),
             desktop_events: DesktopEventTransportManager::new(),
             wake_lock: Mutex::new(None),
-            zoom_level: Mutex::new(DEFAULT_ZOOM_LEVEL),
             remote_origins: Mutex::new(HashMap::new()),
             remote_proxy_sessions: Mutex::new(HashMap::new()),
             remote_skip_tls_verify: Mutex::new(HashMap::new()),
@@ -601,8 +616,16 @@ fn main() {
         })
         .setup(|app| {
             set_windows_app_user_model_id();
+            let client_state = client_state::ClientState::initialize(&app.handle());
+            app.manage(client_state);
+            app.manage(shutdown::ShutdownCoordinator::default());
             build_menu(&app.handle())?;
+            client_state::setup_main_window(&app.handle())
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                shutdown::install_windows_session_end_handler(&window)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
                 let _ = window.eval(LOCAL_WINDOW_CONTEXT_SCRIPT);
             }
             if let Some(shortcut) = fullscreen_shortcut() {
@@ -642,7 +665,15 @@ fn main() {
             wake_lock_start,
             wake_lock_stop,
             needs_local_certificate_install,
-            open_remote_window
+            open_remote_window,
+            client_state::client_state_claim_access,
+            client_state::client_state_load,
+            client_state::client_state_save,
+            client_state::client_state_set_restore_enabled,
+            client_state::client_state_clear,
+            client_state::client_state_renderer_flushed,
+            client_state::client_state_navigation_flushed,
+            windows_update::install_stable_update
         ])
         .on_menu_event(|app_handle, event| {
             match event.id().0.as_str() {
@@ -673,17 +704,18 @@ fn main() {
                     }
                 }
                 "reset_zoom" => {
-                    set_main_window_zoom(app_handle, DEFAULT_ZOOM_LEVEL);
+                    client_state::set_main_window_zoom(
+                        app_handle,
+                        client_state::DEFAULT_ZOOM_LEVEL,
+                    );
                 }
                 "zoom_in" => {
-                    if let Ok(zoom_level) = app_handle.state::<AppState>().zoom_level.lock() {
-                        set_main_window_zoom(app_handle, *zoom_level + ZOOM_STEP);
-                    }
+                    let zoom_level = client_state::main_window_zoom(app_handle);
+                    client_state::set_main_window_zoom(app_handle, zoom_level + ZOOM_STEP);
                 }
                 "zoom_out" => {
-                    if let Ok(zoom_level) = app_handle.state::<AppState>().zoom_level.lock() {
-                        set_main_window_zoom(app_handle, *zoom_level - ZOOM_STEP);
-                    }
+                    let zoom_level = client_state::main_window_zoom(app_handle);
+                    client_state::set_main_window_zoom(app_handle, zoom_level - ZOOM_STEP);
                 }
 
                 "toggle_fullscreen" => {
@@ -707,11 +739,20 @@ fn main() {
                     }
                 }
 
-                // App menu (macOS)
-                "about" => {
-                    // TODO: Implement about dialog
-                    println!("About menu item clicked");
+                "get_updates" => {
+                    #[cfg(windows)]
+                    {
+                        let app_handle = app_handle.clone();
+                        tauri::async_runtime::spawn(run_update_with_fallback(
+                            windows_update::install_stable_update(),
+                            move || open_releases_page(&app_handle),
+                        ));
+                    }
+
+                    #[cfg(not(windows))]
+                    open_releases_page(app_handle);
                 }
+                // App menu (macOS)
                 "hide" => {
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.hide();
@@ -735,20 +776,11 @@ fn main() {
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
             tauri::RunEvent::ExitRequested { api, .. } => {
-                // `app_handle.exit(0)` triggers another `ExitRequested`. Without a guard, we can
-                // prevent exit forever and the app never quits (Cmd+Q / Quit menu appears stuck).
-                if QUIT_REQUESTED.swap(true, Ordering::SeqCst) {
+                if shutdown::exit_allowed(&app_handle) {
                     return;
                 }
                 api.prevent_exit();
-                let app = app_handle.clone();
-                std::thread::spawn(move || {
-                    if let Some(state) = app.try_state::<AppState>() {
-                        state.desktop_events.stop();
-                        let _ = state.manager.stop();
-                    }
-                    app.exit(0);
-                });
+                shutdown::request(app_handle.clone());
             }
             tauri::RunEvent::WindowEvent {
                 label,
@@ -772,35 +804,44 @@ fn main() {
                 emit_window_event(&app_handle, &label, "desktop:folder-drag-leave");
             }
             tauri::RunEvent::WindowEvent {
+                label,
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } => {
+                if label == "main" {
+                    if shutdown::main_window_close_allowed(&app_handle) {
+                        return;
+                    }
+                    let final_window = app_handle.webview_windows().len() == 1;
+                    if shutdown::exit_allowed(&app_handle) {
+                        return;
+                    }
+                    api.prevent_close();
+                    if final_window {
+                        shutdown::request(app_handle.clone());
+                    } else {
+                        shutdown::request_main_window_close(app_handle.clone());
+                    }
+                    return;
+                }
                 // Let windows close normally. App shutdown is handled only after the
                 // last window is actually gone so remote windows can outlive `main`.
-                let _ = api;
             }
             tauri::RunEvent::WindowEvent {
+                label,
                 event: tauri::WindowEvent::Destroyed,
                 ..
             } => {
+                if label == "main" {
+                    shutdown::main_window_destroyed(app_handle.clone());
+                }
                 if !app_handle.webview_windows().is_empty() {
                     return;
                 }
 
                 // Stop the CLI only when the final window is gone and the app is
                 // truly exiting.
-                if QUIT_REQUESTED.swap(true, Ordering::SeqCst) {
-                    return;
-                }
-
-                let app = app_handle.clone();
-                std::thread::spawn(move || {
-                    if let Some(state) = app.try_state::<AppState>() {
-                        state.desktop_events.stop();
-                        let _ = state.manager.stop();
-                    }
-                    app.exit(0);
-                });
+                shutdown::request(app_handle.clone());
             }
             _ => {}
         });
@@ -812,11 +853,27 @@ fn build_menu(app: &AppHandle) -> tauri::Result<()> {
 
     // Create submenus
     let mut submenus = Vec::new();
+    let about_item = PredefinedMenuItem::about(
+        app,
+        Some("About CodeNomad"),
+        Some(build_about_metadata(
+            &app.package_info().version.to_string(),
+            cfg!(target_os = "linux"),
+        )),
+    )?;
+    let get_updates_item = MenuItem::with_id(
+        app,
+        "get_updates",
+        "Get Updates...",
+        true,
+        None::<&str>,
+    )?;
 
     // App menu (macOS only)
     if is_mac {
         let app_menu = SubmenuBuilder::new(app, "CodeNomad")
-            .text("about", "About CodeNomad")
+            .item(&about_item)
+            .item(&get_updates_item)
             .separator()
             .text("hide", "Hide CodeNomad")
             .text("hide_others", "Hide Others")
@@ -954,6 +1011,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<()> {
     };
     submenus.push(window_menu);
 
+    if !is_mac {
+        let help_menu = SubmenuBuilder::new(app, "Help")
+            .item(&get_updates_item)
+            .separator()
+            .item(&about_item)
+            .build()?;
+        submenus.push(help_menu);
+    }
+
     // Build the main menu with all submenus
     let submenu_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> = submenus
         .iter()
@@ -963,4 +1029,70 @@ fn build_menu(app: &AppHandle) -> tauri::Result<()> {
 
     app.set_menu(menu)?;
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+async fn run_update_with_fallback(
+    update: impl Future<Output = Result<(), String>>,
+    fallback: impl FnOnce(),
+) {
+    if let Err(err) = update.await {
+        eprintln!("[tauri] WinGet update failed, opening the releases page: {err}");
+        fallback();
+    }
+}
+
+fn open_releases_page(app_handle: &AppHandle) {
+    if let Err(err) = app_handle.opener().open_url(RELEASES_URL, None::<&str>) {
+        eprintln!("[tauri] failed to open the CodeNomad releases page: {err}");
+    }
+}
+
+fn build_about_metadata(version: &str, include_update_link: bool) -> AboutMetadata<'static> {
+    AboutMetadata {
+        name: Some("CodeNomad".to_string()),
+        version: Some(version.to_string()),
+        authors: Some(vec!["Neural Nomads AI".to_string()]),
+        comments: Some("A desktop workspace for OpenCode.".to_string()),
+        license: Some("MIT".to_string()),
+        website: include_update_link.then(|| RELEASES_URL.to_string()),
+        website_label: include_update_link.then(|| "Get updates".to_string()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::{build_about_metadata, run_update_with_fallback, RELEASES_URL};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn failed_update_uses_release_fallback() {
+        let fallback_called = AtomicBool::new(false);
+
+        tauri::async_runtime::block_on(run_update_with_fallback(
+            async { Err("update failed".to_string()) },
+            || fallback_called.store(true, Ordering::Relaxed),
+        ));
+
+        assert!(fallback_called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn about_metadata_includes_version_and_supported_update_link() {
+        let metadata = build_about_metadata("1.2.3", true);
+
+        assert_eq!(metadata.name.as_deref(), Some("CodeNomad"));
+        assert_eq!(metadata.version.as_deref(), Some("1.2.3"));
+        assert_eq!(metadata.website.as_deref(), Some(RELEASES_URL));
+        assert_eq!(metadata.website_label.as_deref(), Some("Get updates"));
+    }
+
+    #[test]
+    fn about_metadata_omits_unsupported_update_link() {
+        let metadata = build_about_metadata("1.2.3", false);
+
+        assert_eq!(metadata.website, None);
+        assert_eq!(metadata.website_label, None);
+    }
 }

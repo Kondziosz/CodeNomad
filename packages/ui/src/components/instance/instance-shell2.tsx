@@ -30,6 +30,7 @@ import PermissionApprovalModal from "../permission-approval-modal"
 import SessionView from "../session/session-view"
 import MessageSection from "../message-section"
 import PromptAttachmentsBar from "../prompt-input/PromptAttachmentsBar"
+import ActionOverflowMenu, { type ActionOverflowMenuItem } from "../action-overflow-menu"
 import { formatTokenTotal } from "../../lib/formatters"
 import ContextMeter from "../context-meter"
 import { sseManager } from "../../lib/sse-manager"
@@ -68,6 +69,7 @@ import { useDrawerResize } from "./shell/useDrawerResize"
 import { useSessionCache } from "./shell/useSessionCache"
 import { useInstanceSessionContext } from "./shell/useInstanceSessionContext"
 import { isPermissionAutoAcceptEnabled } from "../../stores/permission-auto-accept"
+import { readClientLayoutValue, writeClientLayoutValue } from "../../stores/client-state"
 
 const log = getLogger("session")
 const OPEN_SESSION_SEARCH_EVENT = "codenomad:open-session-search"
@@ -126,6 +128,7 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
   const [draftModel, setDraftModel] = createSignal({ providerId: "", modelId: "" })
   const [draftModelManuallySelected, setDraftModelManuallySelected] = createSignal(false)
   const [draftPromptInputApi, setDraftPromptInputApi] = createSignal<PromptInputApi | null>(null)
+  const [focusConversationSessionId, setFocusConversationSessionId] = createSignal<string | null>(null)
 
   // Worktree selector manages its own dialogs.
   const [showSessionSearch, setShowSessionSearch] = createSignal(false)
@@ -156,8 +159,10 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
   })
 
   const isPhoneLayout = createMemo(() => layoutMode() === "phone")
-  const compactHeaderLayout = createMemo(() => isPhoneLayout() || compactHeaderQuery())
+  const narrowHeaderLayout = createMemo(() => sessionCenterWidthStep() === "narrow")
+  const compactHeaderLayout = createMemo(() => narrowHeaderLayout() || compactHeaderQuery())
   const mobileFullscreen = createMemo(() => props.mobileFullscreenMode && isPhoneLayout())
+  const showCompactFullscreenButton = createMemo(() => isPhoneLayout() && !props.mobileFullscreenMode)
   const compactPromptLayout = createMemo(() => layoutMode() !== "desktop")
   const leftPinningSupported = createMemo(() => layoutMode() !== "phone")
   const rightPinningSupported = createMemo(() => layoutMode() !== "phone")
@@ -168,6 +173,7 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
 
   const drawerChrome = useDrawerChrome({
     t,
+    active: () => Boolean(props.isActiveInstance),
     layoutMode,
     leftPinningSupported,
     rightPinningSupported,
@@ -251,7 +257,7 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
   onMount(() => {
     if (typeof window === "undefined") return
 
-    const savedLeft = window.localStorage.getItem(LEFT_DRAWER_STORAGE_KEY)
+    const savedLeft = readClientLayoutValue(LEFT_DRAWER_STORAGE_KEY)
     if (savedLeft) {
       const parsed = Number.parseInt(savedLeft, 10)
       if (Number.isFinite(parsed)) {
@@ -260,7 +266,7 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
     }
 
     let didLoadRightWidth = false
-    const savedRight = window.localStorage.getItem(RIGHT_DRAWER_STORAGE_KEY)
+    const savedRight = readClientLayoutValue(RIGHT_DRAWER_STORAGE_KEY)
     if (savedRight) {
       const parsed = Number.parseInt(savedRight, 10)
       if (Number.isFinite(parsed)) {
@@ -288,14 +294,12 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
     onCleanup(() => window.removeEventListener("resize", handleResize))
   })
 
-   createEffect(() => {
-     if (typeof window === "undefined") return
-     window.localStorage.setItem(LEFT_DRAWER_STORAGE_KEY, sessionSidebarWidth().toString())
-   })
+  createEffect(() => {
+    writeClientLayoutValue(LEFT_DRAWER_STORAGE_KEY, sessionSidebarWidth().toString())
+  })
 
   createEffect(() => {
-    if (typeof window === "undefined") return
-    window.localStorage.setItem(RIGHT_DRAWER_STORAGE_KEY, rightDrawerWidth().toString())
+    writeClientLayoutValue(RIGHT_DRAWER_STORAGE_KEY, rightDrawerWidth().toString())
   })
 
   createEffect(() => {
@@ -503,13 +507,13 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
 
   const renderSessionHeaderIndicators = () => (
     <div class="flex items-center flex-wrap justify-center gap-2">
-      {renderYoloModePill()}
       <Show when={hasPendingRequests()} fallback={renderActiveSessionStatusPill()}>
         <PermissionNotificationBanner
           instanceId={props.instance.id}
           onClick={() => setPermissionModalOpen(true)}
         />
       </Show>
+      {renderYoloModePill()}
     </div>
   )
 
@@ -538,6 +542,24 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
     if (typeof window === "undefined") return
     window.dispatchEvent(new CustomEvent(OPEN_SESSION_SEARCH_EVENT))
   }
+
+  const narrowHeaderMenuItems = createMemo<ActionOverflowMenuItem[]>(() => {
+    const PreviewIcon = PreviewToggleIcon()
+    return [
+      {
+        key: "search",
+        label: t("instanceShell.chatSearch.openAriaLabel"),
+        icon: <Search class="w-3.5 h-3.5" aria-hidden="true" />,
+        onSelect: handleChatSearchClick,
+      },
+      {
+        key: "preview",
+        label: previewToggleLabel(),
+        icon: <PreviewIcon class="w-3.5 h-3.5" aria-hidden="true" />,
+        onSelect: handlePreviewButtonClick,
+      },
+    ]
+  })
 
   const openBackgroundOutput = (process: BackgroundProcess) => {
     setSelectedBackgroundProcess(process)
@@ -931,6 +953,22 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
     }
   }
 
+  function getActiveCreatedSessionPane(sessionId: string) {
+    if (activeSessionIdForInstance() !== sessionId) return null
+    const pane = sessionCenterEl()?.querySelector<HTMLElement>('.session-cache-pane[data-session-active="true"]')
+    return pane?.dataset.sessionId === sessionId ? pane : null
+  }
+
+  function focusCreatedSessionPrompt(sessionId: string) {
+    const textarea = getActiveCreatedSessionPane(sessionId)?.querySelector<HTMLTextAreaElement>(".prompt-input")
+    if (!textarea || textarea.disabled) return
+    try {
+      textarea.focus({ preventScroll: true })
+    } catch {
+      textarea.focus()
+    }
+  }
+
   async function createAndActivateDraftSession() {
     const agent = draftAgent()
     const model = draftModel()
@@ -941,23 +979,33 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
     if (model.providerId && model.modelId) {
       await updateSessionModel(props.instance.id, session.id, model)
     }
+    if (!window.matchMedia?.("(pointer: coarse)")?.matches || window.matchMedia?.("(any-pointer: fine)")?.matches) {
+      setFocusConversationSessionId(session.id)
+    }
     setActiveParentSession(props.instance.id, session.id)
     return session
   }
 
-  async function handleFirstPromptSend(prompt: string, attachments: Attachment[]) {
+  async function runFirstPromptSubmission(submit: (sessionId: string) => Promise<void>) {
     const session = await createAndActivateDraftSession()
-    await sendMessage(props.instance.id, session.id, prompt, attachments)
+    try {
+      await submit(session.id)
+    } catch (error) {
+      focusCreatedSessionPrompt(session.id)
+      throw error
+    }
+  }
+
+  async function handleFirstPromptSend(prompt: string, attachments: Attachment[]) {
+    await runFirstPromptSubmission((sessionId) => sendMessage(props.instance.id, sessionId, prompt, attachments))
   }
 
   async function handleFirstPromptCommand(commandName: string, args: string) {
-    const session = await createAndActivateDraftSession()
-    await executeCustomCommand(props.instance.id, session.id, commandName, args)
+    await runFirstPromptSubmission((sessionId) => executeCustomCommand(props.instance.id, sessionId, commandName, args))
   }
 
   async function handleFirstPromptShell(command: string) {
-    const session = await createAndActivateDraftSession()
-    await runShellCommand(props.instance.id, session.id, command)
+    await runFirstPromptSubmission((sessionId) => runShellCommand(props.instance.id, sessionId, command))
   }
 
   /** Return to the last conversation */
@@ -990,15 +1038,14 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
                 when={!compactHeaderLayout()}
                 fallback={
                   <div class="flex flex-col w-full gap-1.5">
-                    <div class="flex flex-wrap items-center justify-between gap-2 w-full">
-                      {renderHeaderLeftSlot()}
-
-                      <div class="flex-1 flex items-center justify-center min-w-0">
+                    <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2 w-full">
+                      <div class="flex min-w-0 items-center gap-2">
+                        {renderHeaderLeftSlot()}
                         {renderSessionHeaderIndicators()}
                       </div>
 
                       <div class="flex flex-wrap items-center justify-center gap-1">
-                        <Show when={!showingInfoView()}>
+                        <Show when={!showingInfoView() && !narrowHeaderLayout()}>
                           <IconButton
                             color="inherit"
                             onClick={handleChatSearchClick}
@@ -1023,55 +1070,85 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
                         </span>
                       </div>
 
-                      <div class="flex-1 flex items-center justify-center min-w-0">
+                      <div class="flex flex-1 items-center justify-end gap-1 min-w-0">
                         <span
                           class={`status-indicator ${connectionStatusClass()}`}
                           aria-label={t("instanceShell.connection.ariaLabel", { status: connectionStatusLabel() })}
                         >
                           <span class="status-dot" />
                         </span>
+
+                        <Show when={!isPhoneLayout() && !narrowHeaderLayout()}>
+                          {renderPreviewToggleButton()}
+                        </Show>
+
+                        <Show when={showCompactFullscreenButton() && !narrowHeaderLayout()}>
+                          {renderPreviewToggleButton()}
+                        </Show>
+
+                        <Show when={rightDrawerState() === "floating-closed"}>
+                          <IconButton
+                            ref={setRightToggleButtonEl}
+                            color="inherit"
+                            onClick={handleRightAppBarButtonClick}
+                            aria-label={rightAppBarButtonLabel()}
+                            size="small"
+                            aria-expanded={rightDrawerState() !== "floating-closed"}
+                          >
+                            {rightAppBarButtonIcon()}
+                          </IconButton>
+                        </Show>
                       </div>
-
-                      <Show when={!isPhoneLayout()}>
-                        {renderPreviewToggleButton()}
-                      </Show>
-
-                      <Show when={isPhoneLayout() && !props.mobileFullscreenMode}>
-                        <IconButton
-                          color="inherit"
-                          onClick={props.onEnterMobileFullscreen}
-                          aria-label={t("instanceShell.fullscreen.enter")}
-                          title={t("instanceShell.fullscreen.enter")}
-                          size="small"
-                        >
-                          <Maximize2 class="w-5 h-5" aria-hidden="true" />
-                        </IconButton>
-                        {renderPreviewToggleButton()}
-                      </Show>
-
-                      <Show when={rightDrawerState() === "floating-closed"}>
-                        <IconButton
-                          ref={setRightToggleButtonEl}
-                          color="inherit"
-                          onClick={handleRightAppBarButtonClick}
-                          aria-label={rightAppBarButtonLabel()}
-                          size="small"
-                          aria-expanded={rightDrawerState() !== "floating-closed"}
-                        >
-                          {rightAppBarButtonIcon()}
-                        </IconButton>
-                      </Show>
                     </div>
 
-                    <div class="flex flex-wrap items-center justify-center gap-2 pb-1">
-                      <Show when={!showingInfoView()}>
-                        <ContextMeter
-                          usedTokens={tokenStats().used}
-                          availableTokens={tokenStats().avail}
-                          formatTokens={formatTokenTotal}
-                          usedLabel={t("instanceShell.metrics.usedLabel")}
-                          availableLabel={t("instanceShell.metrics.availableLabel")}
-                        />
+                    <div
+                      class={
+                        narrowHeaderLayout() || showCompactFullscreenButton()
+                          ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 pb-1"
+                          : "flex flex-wrap items-center justify-center gap-2 pb-1"
+                      }
+                    >
+                      <Show when={narrowHeaderLayout() || showCompactFullscreenButton()}>
+                        <div class="flex min-w-0 items-center justify-start">
+                          <Show when={narrowHeaderLayout() && !showingInfoView()}>
+                            <ActionOverflowMenu
+                              items={narrowHeaderMenuItems()}
+                              label={t("messageItem.actions.more")}
+                              triggerClass="message-action-button"
+                              minItems={1}
+                            />
+                          </Show>
+                        </div>
+                      </Show>
+
+                      <div class="flex items-center justify-center">
+                        <Show when={!showingInfoView()}>
+                          <ContextMeter
+                            usedTokens={tokenStats().used}
+                            availableTokens={tokenStats().avail}
+                            formatTokens={formatTokenTotal}
+                            usedLabel={t("instanceShell.metrics.usedLabel")}
+                            availableLabel={t("instanceShell.metrics.availableLabel")}
+                            centerValue={narrowHeaderLayout() || showCompactFullscreenButton()}
+                          />
+                        </Show>
+                      </div>
+
+                      <Show when={narrowHeaderLayout() || showCompactFullscreenButton()}>
+                        <div class="flex items-center justify-end gap-1">
+                          <Show when={showCompactFullscreenButton()}>
+                            <IconButton
+                              color="inherit"
+                              onClick={props.onEnterMobileFullscreen}
+                              aria-label={t("instanceShell.fullscreen.enter")}
+                              title={t("instanceShell.fullscreen.enter")}
+                              size="small"
+                              sx={{ width: 30, height: 30 }}
+                            >
+                              <Maximize2 class="w-5 h-5" aria-hidden="true" />
+                            </IconButton>
+                          </Show>
+                        </div>
                       </Show>
                     </div>
                 </div>
@@ -1237,6 +1314,10 @@ const InstanceShell2: Component<InstanceShellProps> = (props) => {
                           escapeInDebounce={props.escapeInDebounce}
                           isPhoneLayout={isPhoneLayout()}
                           compactPromptLayout={compactPromptLayout()}
+                          focusConversationOnActivate={focusConversationSessionId() === sessionId}
+                          onConversationFocusHandled={() => {
+                            if (focusConversationSessionId() === sessionId) setFocusConversationSessionId(null)
+                          }}
                           registerSessionPromptApi={registerSessionPromptApi}
                           showSidebarToggle={showEmbeddedSidebarToggle()}
                           onSidebarToggle={() => setLeftOpen(true)}

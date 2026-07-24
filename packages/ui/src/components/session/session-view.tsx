@@ -7,8 +7,8 @@ import { messageStoreBus } from "../../stores/message-v2/bus"
 import PromptInput from "../prompt-input"
 import PromptAttachmentsBar from "../prompt-input/PromptAttachmentsBar"
 import { getAttachments, removeAttachment } from "../../stores/attachments"
-import { instances } from "../../stores/instances"
-import { loadMessages, sendMessage, forkSession, renameSession, isSessionMessagesLoading, getSessionMessagesLoadError, markSessionIdleSeen, setActiveParentSession, setActiveSession, runShellCommand, abortSession } from "../../stores/sessions"
+import { instances, waitForInstanceWorkspaceMetadataHydration } from "../../stores/instances"
+import { loadMessages, sendMessage, forkSession, renameSession, isSessionMessagesLoading, getSessionMessagesLoadError, markSessionIdleSeen, ensureSessionAncestorsExpanded, setActiveSessionFromList, runShellCommand, abortSession } from "../../stores/sessions"
 import { clearSessionIdleFade, IDLE_STATUS_VISIBILITY_MS, getSessionStatus, isSessionBusy as getSessionBusyStatus, markSessionIdleFadeStarted } from "../../stores/session-status"
 import { deleteMessage } from "../../stores/session-actions"
 import { showAlertDialog } from "../../stores/alerts"
@@ -20,6 +20,9 @@ import { clearConversationPlaybackForSession } from "../../stores/conversation-s
 import { useConfig } from "../../stores/preferences"
 import { closeSessionPreview, getSessionPreview, showSessionChat } from "../../stores/session-previews"
 import { SessionPreviewView } from "../session-preview-view"
+import { isSnapshotAutoFollowing } from "../virtual-follow-behavior"
+import { getSubmitBottomPinTargetCount, resolveSessionBottomPinIntent, shouldClearSessionBottomPinIntent, type SessionBottomPinIntent } from "./session-bottom-pin-intent"
+import { focusConversationStream } from "../focus-conversation"
 
 const log = getLogger("session")
 
@@ -35,6 +38,8 @@ interface SessionViewProps {
   escapeInDebounce: boolean
   isPhoneLayout?: boolean
   compactPromptLayout?: boolean
+  focusConversationOnActivate?: boolean
+  onConversationFocusHandled?: () => void
   showSidebarToggle?: boolean
   onSidebarToggle?: () => void
   forceCompactStatusLayout?: boolean
@@ -59,7 +64,6 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     if (!currentSession) return false
     return getSessionStatus(props.instanceId, currentSession.id) === "working"
   })
-
   const sessionNeedsInput = createMemo(() => {
     const currentSession = session()
     if (!currentSession) return false
@@ -79,25 +83,78 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   let scrollToBottomHandle: (() => void) | undefined
   let rootRef: HTMLDivElement | undefined
   const pendingIdleSeenTimers = new Set<string>()
-  const [pendingSubmitBottomScrollTargetCount, setPendingSubmitBottomScrollTargetCount] = createSignal<number | null>(null)
+  const [submitBottomPinIntent, setSubmitBottomPinIntent] = createSignal<SessionBottomPinIntent | null>(null)
+  let submitBottomPinIntentSequence = 0
 
   function shouldScrollToBottomOnActivate() {
     const current = session()
     if (!current) return true
     const snapshot = messageStore().getScrollSnapshot(current.id, MESSAGE_SCROLL_CACHE_SCOPE)
-    return !snapshot || snapshot.atBottom
+    return isSnapshotAutoFollowing(snapshot)
   }
 
-  function scheduleScrollToBottom(options?: { force?: boolean }) {
+  function scheduleScrollToBottom(options?: { force?: boolean; sessionId?: string }) {
     if (!scrollToBottomHandle) return false
+    const targetSessionId = options?.sessionId ?? props.sessionId
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        const current = session()
+        if (!current || current.id !== targetSessionId) return
         if (!options?.force && !shouldScrollToBottomOnActivate()) return
         scrollToBottomHandle?.()
       })
     })
     return true
   }
+
+  function startSubmitBottomPinIntent(
+    minItemCount: number,
+    options?: { createdMessageCount?: number; preserveObservedStreaming?: boolean },
+  ) {
+    submitBottomPinIntentSequence += 1
+    const previous = submitBottomPinIntent()
+    const createdMessageCount = options?.createdMessageCount ?? messageStore().getSessionMessageIds(props.sessionId).length
+    const shouldPreserveObservedStreaming = Boolean(
+      options?.preserveObservedStreaming &&
+      previous?.sessionId === props.sessionId &&
+      previous.createdMessageCount === createdMessageCount,
+    )
+    const intent: SessionBottomPinIntent = {
+      sessionId: props.sessionId,
+      token: submitBottomPinIntentSequence,
+      minItemCount,
+      createdMessageCount,
+      observedStreaming: shouldPreserveObservedStreaming ? previous?.observedStreaming === true : false,
+    }
+    setSubmitBottomPinIntent(intent)
+    return intent
+  }
+
+  function forceSubmittedExchangeToBottom(
+    minItemCount: number,
+    options?: { createdMessageCount?: number; preserveObservedStreaming?: boolean },
+  ) {
+    const intent = startSubmitBottomPinIntent(minItemCount, options)
+    scrollToBottomHandle?.()
+    return intent
+  }
+
+  const activeSubmitBottomPinIntent = createMemo(() => {
+    const intent = submitBottomPinIntent()
+    const currentSession = session()
+    if (!intent || !currentSession) return null
+
+    const messageCount = messageStore().getSessionMessageIds(currentSession.id).length
+    if (shouldClearSessionBottomPinIntent(intent, {
+      sessionId: currentSession.id,
+      messageCount,
+      streamingActive: sessionStreamingActive(),
+    })) {
+      return null
+    }
+
+    return resolveSessionBottomPinIntent(intent, currentSession.id)
+  })
 
   function getSeenIdleEntries(currentSession: Session, keepUnseenSubagentIdleStatus: boolean): Array<{ id: string; idleSince: number }> {
     const entries: Array<{ id: string; idleSince: number }> = []
@@ -108,7 +165,7 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
     if (currentSession.parentId === null && !keepUnseenSubagentIdleStatus) {
       for (const child of props.activeSessions.values()) {
-        if (child.parentId !== currentSession.id) continue
+        if (child.id === currentSession.id) continue
         if (child.status !== "idle") continue
         if (typeof child.idleSince !== "number") continue
         entries.push({ id: child.id, idleSince: child.idleSince })
@@ -117,6 +174,14 @@ export const SessionView: Component<SessionViewProps> = (props) => {
 
     return entries
   }
+
+  createEffect(
+    on(
+      () => props.sessionId,
+      () => setSubmitBottomPinIntent(null),
+      { defer: true },
+    ),
+  )
 
   createEffect(
     on(
@@ -131,6 +196,26 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   )
 
   createEffect(() => {
+    const intent = submitBottomPinIntent()
+    const currentSession = session()
+    if (!intent || !currentSession) return
+
+    if (sessionStreamingActive() && intent.sessionId === currentSession.id && !intent.observedStreaming) {
+      setSubmitBottomPinIntent({ ...intent, observedStreaming: true })
+      return
+    }
+
+    const messageCount = messageStore().getSessionMessageIds(currentSession.id).length
+    if (shouldClearSessionBottomPinIntent(intent, {
+      sessionId: currentSession.id,
+      messageCount,
+      streamingActive: sessionStreamingActive(),
+    })) {
+      setSubmitBottomPinIntent(null)
+    }
+  })
+
+  createEffect(() => {
     const currentSession = session()
     if (!props.isActive || !currentSession) return
 
@@ -140,13 +225,10 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       if (pendingIdleSeenTimers.has(timerKey)) continue
       pendingIdleSeenTimers.add(timerKey)
       markSessionIdleFadeStarted(props.instanceId, entry.id)
+      markSessionIdleSeen(props.instanceId, entry.id)
 
       window.setTimeout(() => {
         pendingIdleSeenTimers.delete(timerKey)
-        const latestEntry = props.activeSessions.get(entry.id)
-        if (latestEntry?.status === "idle" && latestEntry.idleSince === entry.idleSince) {
-          markSessionIdleSeen(props.instanceId, entry.id)
-        }
         clearSessionIdleFade(props.instanceId, entry.id, entry.idleSince)
       }, IDLE_STATUS_VISIBILITY_MS)
     }
@@ -157,13 +239,13 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       () => props.isActive,
       (isActive) => {
         if (!isActive) {
+          if (props.focusConversationOnActivate) props.onConversationFocusHandled?.()
           clearConversationPlaybackForSession(props.instanceId, props.sessionId)
           return
         }
-        if (!isActive) return
 
         // On phones, focusing the prompt on session switch is disruptive (it raises the OSK).
-        if (props.isPhoneLayout) return
+        if (props.isPhoneLayout && !props.focusConversationOnActivate) return
 
         // Don't steal focus from other inputs (command palette, dialogs, selectors, etc.)
         if (typeof document === "undefined") return
@@ -181,6 +263,19 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         // Defer until the session pane is visible and the textarea is mounted.
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
+            if (!props.isActive) return
+            if (props.focusConversationOnActivate) {
+              const activeElement = document.activeElement
+              const focusIsUnclaimed =
+                !activeElement || activeElement === document.body || activeElement === document.documentElement
+              const modalIsOpen = Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'))
+              if (focusIsUnclaimed && !modalIsOpen && focusConversationStream(rootRef)) {
+                props.onConversationFocusHandled?.()
+                return
+              }
+              props.onConversationFocusHandled?.()
+              if (!focusIsUnclaimed || modalIsOpen) return
+            }
             if (promptInputApi) {
               promptInputApi.focus()
               return
@@ -202,10 +297,16 @@ export const SessionView: Component<SessionViewProps> = (props) => {
   )
 
   createEffect(() => {
+    if (!props.isActive) return
     const currentSession = session()
-    if (currentSession) {
-      loadMessages(props.instanceId, currentSession.id).catch((error) => log.error("Failed to load messages", error))
-    }
+    if (!currentSession) return
+    const sessionId = currentSession.id
+    void waitForInstanceWorkspaceMetadataHydration(props.instanceId)
+      .then(() => {
+        if (!props.isActive || session()?.id !== sessionId) return
+        return loadMessages(props.instanceId, sessionId)
+      })
+      .catch((error) => log.error("Failed to load messages", error))
   })
 
   function handleReloadMessages() {
@@ -215,21 +316,6 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       log.error("Failed to reload messages", error),
     )
   }
-
-  createEffect(
-    on(
-      () => messageStore().getSessionMessageIds(props.sessionId).length,
-      (messageCount) => {
-        const targetCount = pendingSubmitBottomScrollTargetCount()
-        if (targetCount === null) return
-        const didSchedule = scheduleScrollToBottom({ force: true })
-        if (didSchedule && messageCount >= targetCount) {
-          setPendingSubmitBottomScrollTargetCount(null)
-        }
-      },
-      { defer: true },
-    ),
-  )
 
   function registerPromptInputApi(api: PromptInputApi) {
     promptInputApi = api
@@ -273,17 +359,24 @@ export const SessionView: Component<SessionViewProps> = (props) => {
       pendingCommentText = `${pendingCommentText ?? ""}${markdown}`
     }
   }
- 
+
   async function handleSendMessage(prompt: string, attachments: Attachment[]) {
     const messageCount = messageStore().getSessionMessageIds(props.sessionId).length
-    setPendingSubmitBottomScrollTargetCount(messageCount + 2)
-    scheduleScrollToBottom({ force: true })
+    const submittedExchangeTargetCount = getSubmitBottomPinTargetCount(messageCount, sessionStreamingActive())
+    const initialPinIntent = forceSubmittedExchangeToBottom(submittedExchangeTargetCount, { createdMessageCount: messageCount })
     try {
       await sendMessage(props.instanceId, props.sessionId, prompt, attachments)
-      scheduleScrollToBottom({ force: true })
-      setPendingSubmitBottomScrollTargetCount(null)
+      const latestMessageCount = messageStore().getSessionMessageIds(props.sessionId).length
+      if (latestMessageCount < submittedExchangeTargetCount && !sessionStreamingActive()) {
+        setSubmitBottomPinIntent(null)
+      } else if (submitBottomPinIntent()?.token === initialPinIntent.token) {
+        forceSubmittedExchangeToBottom(Math.max(submittedExchangeTargetCount, latestMessageCount), {
+          createdMessageCount: messageCount,
+          preserveObservedStreaming: true,
+        })
+      }
     } catch (error) {
-      setPendingSubmitBottomScrollTargetCount(null)
+      setSubmitBottomPinIntent(null)
       throw error
     }
   }
@@ -401,11 +494,8 @@ export const SessionView: Component<SessionViewProps> = (props) => {
         log.error("Failed to rename forked session", error)
       })
 
-      const parentToActivate = forkedSession.parentId ?? forkedSession.id
-      setActiveParentSession(props.instanceId, parentToActivate)
-      if (forkedSession.parentId) {
-        setActiveSession(props.instanceId, forkedSession.id)
-      }
+      ensureSessionAncestorsExpanded(props.instanceId, forkedSession.id)
+      setActiveSessionFromList(props.instanceId, forkedSession.id)
 
       await loadMessages(props.instanceId, forkedSession.id).catch((error) => log.error("Failed to load forked session messages", error))
 
@@ -448,20 +538,14 @@ export const SessionView: Component<SessionViewProps> = (props) => {
                   loadError={messagesLoadError()}
                   onReloadMessages={handleReloadMessages}
                   sessionStreamingActive={sessionStreamingActive()}
+                  explicitBottomPinIntent={activeSubmitBottomPinIntent()}
+                  onExplicitBottomPinCancelled={() => setSubmitBottomPinIntent(null)}
                   onRevert={handleRevert}
                   onDeleteMessagesUpTo={handleDeleteMessagesUpTo}
                   onFork={handleFork}
                   isActive={props.isActive}
                   registerScrollToBottom={(fn) => {
                     scrollToBottomHandle = fn ?? undefined
-                    if (!fn) return
-                    const targetCount = pendingSubmitBottomScrollTargetCount()
-                    if (targetCount === null) return
-                    const didSchedule = scheduleScrollToBottom({ force: true })
-                    const messageCount = messageStore().getSessionMessageIds(props.sessionId).length
-                    if (didSchedule && messageCount >= targetCount) {
-                      setPendingSubmitBottomScrollTargetCount(null)
-                    }
                   }}
                   showSidebarToggle={props.showSidebarToggle}
                   onSidebarToggle={props.onSidebarToggle}
