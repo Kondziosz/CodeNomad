@@ -106,7 +106,6 @@ const openRouter: UsageProvider = {
   },
 }
 
-const CREDIT_LIMIT_TYPE = "CREDIT_LIMIT"
 const UNIT_SECONDS: Record<number, number> = { 3: 3_600, 6: 604_800 }
 
 function unitWindowSeconds(unit: unknown, count: number | null): number | null {
@@ -135,7 +134,7 @@ function createTokenLimitProvider(input: { id: string; name: string; aliases: re
               windowSeconds: seconds,
               resetAt: toTimestamp(limit.nextResetTime),
             })
-          } else if (limit && limit.type === CREDIT_LIMIT_TYPE) {
+          } else if (limit && limit.type === "CREDIT_LIMIT") {
             const usedPercent = toNumber(limit.percentage)
             const remaining = toNumber(limit.remaining)
             const allowance = toNumber(limit.usage)
